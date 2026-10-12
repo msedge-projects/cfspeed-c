@@ -53,6 +53,7 @@ jobs:
         run: |
           export PATH="/mingw64/bin:$PATH"
           make
+          strip cfspeed.exe || true
 
       - name: Upload binary
         uses: actions/upload-artifact@v4

@@ -52,15 +52,28 @@ jobs:
         run: |
           export PATH="/mingw64/bin:$PATH"
           make
-          strip cfspeed || true
+          strip cfspeed.exe || true
+          # Ship the runtime deps: the exe is not standalone without them.
+          for dll in $(ldd cfspeed.exe | grep -o '[A-Za-z0-9_-]*\.dll'); do
+            src=$(ldd cfspeed.exe | grep -o "[^ ]*$dll" | head -1)
+            [ -f "$src" ] && cp "$src" .
+          done
 
       - name: Package
         shell: bash
         run: |
           mkdir -p dist
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            mv cfspeed.exe dist/
-            (cd dist && zip cfspeed-${{ matrix.asset }}.zip cfspeed.exe)
+            # The binary links libcurl dynamically, so it is not standalone
+            # without its runtime dependencies beside it.
+            mkdir -p win
+            mv cfspeed.exe win/
+            for dll in $(ldd cfspeed.exe | grep -o '[A-Za-z0-9_-]*\.dll'); do
+              src=$(ldd cfspeed.exe | grep -o "[^ ]*$dll" | head -1)
+              [ -f "$src" ] && cp "$src" win/
+            done
+            cp win/*.dll dist/ 2>/dev/null || true
+            (cd dist && zip cfspeed-${{ matrix.asset }}.zip cfspeed.exe *.dll)
           else
             cp cfspeed dist/cfspeed-${{ matrix.asset }}
             tar -czf dist/cfspeed-${{ matrix.asset }}.tar.gz -C dist cfspeed-${{ matrix.asset }}
