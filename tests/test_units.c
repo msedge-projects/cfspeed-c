@@ -251,6 +251,34 @@ TEST(stats_every_function_is_finite_on_an_all_nan_array)
     ASSERT_DBL(stats_bufferbloat(bad, 3, 10.0), 0.0, 0.0);
 }
 
+TEST(stats_survives_inputs_that_overflow_the_accumulator)
+{
+    /* sane() is the module's last line of defence. The file header promises
+     * every function returns a finite result "or exactly 0.0", and the comment
+     * on sane() gives the reason: "NaN is the only value that renders as
+     * garbage; inf draws as a full bar." The finite filter upstream keeps NaN
+     * out of the inputs, but it cannot stop an accumulator from overflowing --
+     * two samples of 1e308 sum to inf, and inf/2 is still inf. Every other
+     * totality test here feeds in NaN, which the filter already handles, so
+     * without this one the guarantee would rest on untested code. */
+    const double huge[2] = { 1.0e308, 1.0e308 };
+
+    ASSERT_DBL(stats_mean(huge, 2), 0.0, 0.0);            /* sum overflows */
+    ASSERT_DBL(stats_stddev(huge, 2), 0.0, 0.0);          /* squares overflow */
+    ASSERT_DBL(stats_jitter(huge, 2), 0.0, 0.0);
+    ASSERT_DBL(stats_cv_percent(huge, 2), 0.0, 0.0);
+    ASSERT_DBL(stats_trimmed_mean(huge, 2), 0.0, 0.0);
+
+    /* Rank statistics read an element rather than an accumulated sum, so they
+     * stay exact and must NOT be flattened to 0: a genuine extreme sample is a
+     * measurement, not a missing one. */
+    ASSERT_DBL(stats_median(huge, 2), 1.0e308, 0.0);
+    ASSERT_DBL(stats_min(huge, 2), 1.0e308, 0.0);
+    ASSERT_DBL(stats_max(huge, 2), 1.0e308, 0.0);
+    ASSERT_DBL(stats_percentile(huge, 2, 0.5), 1.0e308, 0.0);
+    ASSERT_DBL(stats_bufferbloat(huge, 2, 1.0), 1.0e308, 0.0);
+}
+
 TEST(stats_nan_samples_are_dropped_not_propagated)
 {
     /* A dropped probe must not shift every rank. With {1, NaN, 3, NaN, 5} the
@@ -1320,6 +1348,36 @@ TEST(actions_enabled_set_matches_the_state)
     /* ITEM_COUNT is not a MenuItem and must not be offered. */
     ASSERT(actions_enabled(ITEM_COUNT, 1, 0) == 0);
     ASSERT(actions_enabled((MenuItem)999, 1, 0) == 0);
+}
+
+TEST(actions_stale_items_are_poisoned_when_the_set_shrinks)
+{
+    /* Poisoning the slots past count is only observable once the set shrinks.
+     * actions_init() already fills the array with ITEM_COUNT, so the very first
+     * rebuild hides a missing poison step entirely. Growing the enabled set
+     * from idle (7 items) to running (8) and back again leaves index 7 holding
+     * a real, enabled item unless rebuild clears it -- and a view that trusts
+     * the array instead of the count would then draw a row the user already
+     * ruled out. This is the one sequence that separates the two behaviours. */
+    ActionMenu m;
+
+    actions_init(&m);
+    actions_apply(&m, ACTMENU_OPEN, 0, 0); /* idle: 7 items, {2..8} */
+    ASSERT(m.count == 7);
+    ASSERT(m.items[0] == ITEM_RERUN);
+
+    actions_apply(&m, ACTMENU_NONE, 1, 0); /* running: 8 items, {1..8} */
+    ASSERT(m.count == 8);
+    ASSERT(m.items[0] == ITEM_PAUSE);
+
+    actions_apply(&m, ACTMENU_NONE, 0, 0); /* idle again: 7 items, {2..8} */
+    ASSERT(m.count == 7);
+
+    for (int i = m.count; i < ITEM_COUNT; i++) {
+        if (m.items[i] != ITEM_COUNT)
+            FAIL_MSG("stale item at slot %d after the set shrank: %d", i, m.items[i]);
+        ASSERT(m.items[i] == ITEM_COUNT);
+    }
 }
 
 TEST(actions_labels_are_never_null)

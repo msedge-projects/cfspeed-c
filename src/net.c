@@ -409,7 +409,7 @@ void net_fetch_meta(const char *base_url, Meta *m) {
                 snprintf(m->tls, sizeof m->tls, "%s", v);
             if (trace_field(sink.buf, "http", v, sizeof v)) {
                 /* trace reports "http/1.1"; the UI shows it as a protocol. */
-                for (size_t i = 0; v[i] && i < 3; i++)
+                for (size_t i = 0; v[i] && i < 4; i++)
                     if (v[i] >= 'a' && v[i] <= 'z') v[i] = (char)(v[i] - 32);
                 snprintf(m->http, sizeof m->http, "%s", v);
             }
