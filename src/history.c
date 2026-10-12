@@ -508,6 +508,15 @@ static int read_bool(const char *obj, const char *end, const char *key, int *out
     return 0;
 }
 
+/* A count read out of a file is a double until it is not, and a double above
+ * UINT64_MAX has no defined conversion to one. Clamping keeps a hand-edited
+ * or truncated number from being undefined behaviour instead of a wrong value. */
+static uint64_t to_u64(double d) {
+    if (!(d > 0.0)) return 0;
+    if (d >= 18446744073709551616.0) return UINT64_MAX;
+    return (uint64_t)d;
+}
+
 /* A count that goes on to index an array. Returns -1 when absent, so a caller
  * can tell "not written" from "written as zero"; clamps to hi either way,
  * since the value comes out of a file and nothing else bounds it. */
@@ -520,7 +529,7 @@ static int read_count(const char *obj, const char *end, const char *key, int hi)
 
 static void read_tput(const char *obj, const char *end, Throughput *t) {
     double d;
-    if (read_num(obj, end, "bytes", &d)) t->bytes = (uint64_t)(d > 0.0 ? d : 0.0);
+    if (read_num(obj, end, "bytes", &d)) t->bytes = to_u64(d);
     /* views gates the whole DETAILS section on this, so dropping it here is
      * what makes a historical run render as an empty column. */
     int n = read_count(obj, end, "nsamples", MAX_SAMPLES);
@@ -574,7 +583,7 @@ static int parse_run(const char *obj, const char *end, RunResult *r) {
     if (member_span(obj, end, "grades", &s, &e))  { gob = s; goe = e; found++; }
 
     if (read_num(obj, end, "timestamp_ms", &d)) {
-        r->timestamp_ms = (uint64_t)(d > 0.0 ? d : 0.0);
+        r->timestamp_ms = to_u64(d);
         found++;
     }
     if (read_num(mob, moe, "dns_ms", &d)) { r->meta.dns_ms = d; found++; }

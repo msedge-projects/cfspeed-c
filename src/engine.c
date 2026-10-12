@@ -77,7 +77,11 @@ void stats_finalise(double *samples, int n, uint64_t bytes, uint64_t duration_ms
     out->avg = out->p95 = out->max = 0.0;
 
     if (duration_ms > 0)
-        out->avg = (double)bytes * 8.0 / (double)duration_ms / 1e6;
+        /* duration_ms is milliseconds, so the bits-per-millisecond figure this
+     * computes is a thousandth of a megabit per second. Dividing by 1e6 here
+     * reported every result 1000x low - a 105 Mbps link printed as 0.1 Mbps
+     * while p95, computed per-sample, printed 105 and the two disagreed. */
+    out->avg = (double)bytes * 8.0 / (double)duration_ms / 1e3;
 
     if (n <= 0) return;
     double *sorted = (double *)malloc((size_t)n * sizeof(double));

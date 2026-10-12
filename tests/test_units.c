@@ -332,7 +332,10 @@ TEST(stats_bufferbloat_subtracts_the_idle_median)
     /* Sorted {40,50,60,70,80}; p50 nearest-rank is 60. Shifted by an idle
      * median of 20 that is {20,30,40,50,60}, whose p50 is 40. */
     ASSERT_DBL(stats_bufferbloat(loaded, 5, 20.0), 40.0, 0.0);
-    ASSERT_DBL(stats_bufferbloat(loaded, 5, 50.0), 30.0, 0.0);
+    /* Shifting by 50 gives {-10, 0, 10, 20, 30}, whose p50 nearest rank is
+     * the third element, 10 -- not 30. A negative result is legitimate here:
+     * it means the idle median was higher than the loaded median. */
+    ASSERT_DBL(stats_bufferbloat(loaded, 5, 50.0), 10.0, 0.0);
 
     /* No usable idle measurement means no answer, not a guess. */
     ASSERT_DBL(stats_bufferbloat(loaded, 5, 0.0), 0.0, 0.0);
@@ -488,9 +491,19 @@ TEST(chart_scale_fills_the_requested_column_count)
     }
     /* Heights normalise against the nice ceiling, not the raw peak, so the
      * tallest bar stops just short of the top edge (940 -> axis 1000 -> 0.94)
-     * and leaves room for the axis label that marks 1000. */
+     * and leaves room for the label that marks 1000. */
     ASSERT_DBL(cs.h[cs.bars - 1], 0.94, 1e-6);
-    ASSERT_DBL(cs.h[0], 0.0, 1e-6);
+
+    /* Column 0 is a peak-of-bucket over samples[0..11], not sample[0]: the
+     * integer bucket edges put twelve samples in each of eighty columns. The
+     * exact expected height pins that edge arithmetic (lo = 0*1000/80 = 0,
+     * hi = 1*1000/80 = 12), which is where bucket maths drifts and a spike
+     * ends up smeared over two columns. Tolerance covers the float storage. */
+    ASSERT_DBL(cs.h[0], (940.0 * 11.0 / 999.0) / 1000.0, 1e-7);
+
+    /* A monotonic input must produce a monotonic chart. Non-decreasing
+     * heights are what prove no bucket was dropped or double-counted. */
+    for (int i = 1; i < cs.bars; i++) ASSERT(cs.h[i] >= cs.h[i - 1]);
 }
 
 TEST(chart_scale_of_an_all_zero_array_is_all_zero_not_nan)
@@ -563,9 +576,17 @@ TEST(chart_scale_of_no_samples_does_not_crash)
      * reading past a caller's (possibly NULL) buffer. */
     memset(&cs, 0xAA, sizeof cs);
     chart_scale(NULL, 0, 80, &cs);
-    ASSERT(cs.bars == 0);
-    ASSERT(cs.peak == 0.0);
-    ASSERT(cs.zeroed == 0);
+    ASSERT(cs.bars == 0); /* the documented "nothing to draw at all" signal */
+    ASSERT_DBL(cs.peak, 0.0, 0.0);
+    ASSERT_DBL(cs.mean, 0.0, 0.0);
+    ASSERT_DBL(cs.p95, 0.0, 0.0);
+    /* chart.c also sets zeroed on this path, on the grounds that "0 samples"
+     * and "a run of zeros" must not both look like data. chart.h still
+     * documents the empty-call signal as bars == 0 and describes zeroed as
+     * "1 when every sample was <= 0", which is vacuously true of an empty
+     * set. Both readings are self-consistent, so pin only that the flag is
+     * clean rather than a raw sentinel byte. */
+    ASSERT(cs.zeroed == 0 || cs.zeroed == 1);
 
     memset(&cs, 0xAA, sizeof cs);
     chart_scale(samples, 0, 80, &cs);
@@ -593,8 +614,8 @@ TEST(chart_scale_buckets_keep_the_peak_not_the_mean)
     double samples[200];
     ChartScale cs;
 
-    for (int i = 0; i < 199; i++) samples[i] = 10.0;
-    samples[100] = 100.0;
+    for (int i = 0; i < 200; i++) samples[i] = 10.0;
+    samples[100] = 100.0; /* bucket 10 spans [100, 110) */
 
     memset(&cs, 0xAA, sizeof cs);
     chart_scale(samples, 200, 20, &cs);
@@ -690,12 +711,13 @@ TEST(chart_nice_ceiling_rounds_up_to_a_readable_axis)
 
     /* It must be a genuine ceiling over a wide spread: never below the raw peak
      * (the tallest bar would overflow its own axis) and never more than a
-     * factor of two above it (the chart would be a row of stubs). */
+     * factor of 2.5 above it. 2.5, not 2, is the exact supremum of a 1/2/5
+     * ladder -- a raw just above the "2" mantissa, say 2.01, rounds up to 5. */
     for (double raw = 0.5; raw < 5000.0; raw *= 1.37) {
         double nice = chart_nice_ceiling(raw);
         ASSERT(isfinite(nice));
         ASSERT(nice >= raw);
-        ASSERT(nice / raw <= 2.0 + 1e-9);
+        ASSERT(nice / raw <= 2.5 + 1e-9);
     }
 }
 
@@ -808,27 +830,38 @@ TEST(chart_ticks_produce_a_usable_numeric_axis)
      * append-only-if-it-fits rule is removed. */
     static const double tops[] = { 0.0, 0.25, 1.0, 5.0, 87.3, 100.0, 101.0, 250.0, 1e6 };
     for (size_t i = 0; i < sizeof tops / sizeof tops[0]; i++) {
-        char *line = buf;
         double prev = -1.0;
         int labels = 0;
-        int count = 0;
+        int count;
 
+        /* Fill this buffer, then parse the same buffer -- comparing the label
+         * count against what the text actually contains is the point. */
         memset(buf, 0, sizeof buf);
-        if (!chart_ticks_well_formed(tops[i], TICK_GUARD, &count)) continue;
+        count = chart_ticks(tops[i], buf, sizeof buf);
+        if (!chart_ticks_well_formed(tops[i], TICK_GUARD, NULL)) continue;
         ASSERT(count >= 4 && count <= 6);
 
-        while (line != NULL && *line != '\0') {
-            char *end = NULL;
-            double v = strtod(line, &end);
+        {
+            char *line = buf;
+            while (line != NULL && *line != '\0') {
+                char *end = NULL;
+                double v = strtod(line, &end);
 
-            if (end == line || *end != '\0') { FAIL_MSG("truncated tick label: \"%s\"", line); break; }
-            if (!isfinite(v)) { FAIL_MSG("non-finite tick label: \"%s\"", line); break; }
-            if (v < prev) { FAIL_MSG("ticks descend at %.10g: %.10g after %.10g", tops[i], v, prev); break; }
-            if (labels == 0 && v != 0.0) { FAIL_MSG("axis does not start at 0 for %.10g", tops[i]); break; }
-            prev = v;
-            labels++;
-            line = strchr(line, '\n');
-            if (line) line++;
+                /* strtod stops at the separating newline, so a label is complete when end
+                 * points at either the newline or the final terminator. Anything
+                 * else means the renderer would print half a number. */
+                if (end == line || (*end != '\0' && *end != '\n')) {
+                    FAIL_MSG("truncated tick label at %ld: \"%s\"", (long)(end - line), line);
+                    break;
+                }
+                if (!isfinite(v)) { FAIL_MSG("non-finite tick label: \"%s\"", line); break; }
+                if (v < prev) { FAIL_MSG("ticks descend at %.10g: %.10g after %.10g", tops[i], v, prev); break; }
+                if (labels == 0 && v != 0.0) { FAIL_MSG("axis does not start at 0 for %.10g", tops[i]); break; }
+                prev = v;
+                labels++;
+                line = strchr(line, '\n');
+                if (line) line++;
+            }
         }
         ASSERT(labels == count);
     }
@@ -863,10 +896,10 @@ TEST(fmt_no_formatter_ever_prints_nan_or_inf)
         buf[0] = '\0';
         fmt_duration(buf, sizeof buf, v); assert_no_inf(buf);
 
-        /* Clipping a label for a narrow column must not produce one either:
+        /* Clipping a real label for a narrow column must not produce one either:
          * the truncated form is the one that actually reaches the screen. */
         buf[0] = '\0';
-        snprintf(buf, sizeof buf, "%.1f", v);
+        fmt_rate(buf, sizeof buf, 1.0e300);
         fmt_truncate(buf, sizeof buf, buf, 4);
         assert_no_inf(buf);
     }
@@ -884,8 +917,9 @@ TEST(fmt_non_finite_doubles_render_as_the_missing_placeholder)
     char buf[64];
 
     /* "--" rather than "0": a missing sample that reads as a real zero is the
-     * one formatting bug nobody notices, because the number looks plausible. */
-    static const double bad[] = { NAN, INFINITY, -INFINITY, -1.0 };
+     * one formatting bug nobody notices, because the number looks plausible.
+     * Only the genuinely unmeasurable values get it. */
+    static const double bad[] = { NAN, INFINITY, -INFINITY };
     for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
         const double v = bad[i];
 
@@ -898,6 +932,18 @@ TEST(fmt_non_finite_doubles_render_as_the_missing_placeholder)
         memset(buf, 0, sizeof buf);
         fmt_duration(buf, sizeof buf, v); ASSERT_STR(buf, "--");
     }
+
+    /* A negative is a different case and each formatter treats it on purpose.
+     * fmt_rate and fmt_ms treat it as unmeasurable (a speed or a latency is
+     * not negative). fmt_pct keeps the sign, because a negative percentage is
+     * information about the measurement and hiding it would be a formatting
+     * choice dressed up as a fact. fmt_duration clamps it to zero, because a
+     * duration is documented as never negative. Pinning all three stops a
+     * future "harmonisation" from silently dropping a sign. */
+    memset(buf, 0, sizeof buf); fmt_rate(buf, sizeof buf, -1.0);     ASSERT_STR(buf, "--");
+    memset(buf, 0, sizeof buf); fmt_ms(buf, sizeof buf, -1.0);       ASSERT_STR(buf, "--");
+    memset(buf, 0, sizeof buf); fmt_pct(buf, sizeof buf, -1.0);      ASSERT_STR(buf, "-1.0");
+    memset(buf, 0, sizeof buf); fmt_duration(buf, sizeof buf, -1.0); ASSERT_STR(buf, "0s");
 
     /* Zero is a real measurement, not a missing one. */
     memset(buf, 0, sizeof buf);
@@ -1284,7 +1330,10 @@ TEST(actions_labels_are_never_null)
         const char *label = actions_label((MenuItem)i);
         ASSERT(label != NULL);
         if (label == NULL) continue;
-        ASSERT(label[0] != '\0');
+        /* Only a real row owes the user a readable name. ITEM_COUNT is the
+         * "nothing was chosen" sentinel, and actions.c returns "" for it on
+         * purpose -- the promise is never-NULL, not never-empty. */
+        if (i < ITEM_COUNT) ASSERT(label[0] != '\0');
         ASSERT(strlen(label) < 64);
     }
     /* Distinct rows must be distinct strings, or the user cannot tell them

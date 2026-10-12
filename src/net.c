@@ -165,9 +165,11 @@ static int file_exists(const char *path) {
  * Disabling verification instead would be a security regression on a tool whose
  * entire job is trusting a remote endpoint. */
 static void use_ca_bundle(CURL *c) {
-    char path[512];
-
 #if defined(_WIN32)
+    /* Declared inside the branch that uses it: the POSIX path below never
+     * builds a path, so hoisting this out left an unused-variable warning
+     * under -Wall on every Linux/macOS build. */
+    char path[512];
     /* Next to the executable, which is where the release puts it. */
     char exe[MAX_PATH];
     DWORD n = GetModuleFileNameA(NULL, exe, (DWORD)sizeof exe);
@@ -278,6 +280,31 @@ static void url_host(const char *url, char *out, size_t cap) {
     out[i] = '\0';
 }
 
+/* /cdn-cgi/trace answers a flat "key=value" listing, one pair per line.
+ *
+ * Matching is anchored to the start of a line. A plain strstr for "ip=" would
+ * also match the tail of some other token, and a match that is not at a line
+ * start is far more likely to be the wrong field than the right one. */
+static int trace_field(const char *body, const char *key, char *out, size_t cap) {
+    if (cap == 0) return 0;
+    size_t klen = strlen(key);
+    const char *p = body;
+    while (p && *p) {
+        const char *eol = strchr(p, '\n');
+        size_t len = eol ? (size_t)(eol - p) : strlen(p);
+        if (len > klen && p[klen] == '=' && memcmp(p, key, klen) == 0) {
+            size_t vlen = len - klen - 1;
+            if (vlen >= cap) vlen = cap - 1;
+            memcpy(out, p + klen + 1, vlen);
+            out[vlen] = '\0';
+            return 1;
+        }
+        if (!eol) break;
+        p = eol + 1;
+    }
+    return 0;
+}
+
 void net_fetch_meta(const char *base_url, Meta *m) {
     memset(m, 0, sizeof *m);
 
@@ -356,7 +383,43 @@ void net_fetch_meta(const char *base_url, Meta *m) {
         free(sink.buf);
     }
 
-    /* /meta carries the colo, the client IP and the ASN. */
+    /* The colo, the client IP and the location come from /cdn-cgi/trace.
+     * /meta answers an empty object {} for most clients now, so parsing it left
+     * every one of these fields blank - the app ran and measured correctly but
+     * could not say where it was or which edge it reached. */
+    {
+        Sink sink = {0};
+        char url[512];
+        snprintf(url, sizeof url, "%s/cdn-cgi/trace", base_url);
+        curl_easy_reset(c);
+        curl_base(c, url);
+        curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, sink_cb);
+        curl_easy_setopt(c, CURLOPT_WRITEDATA, &sink);
+        if (curl_easy_perform(c) == CURLE_OK && sink.buf) {
+            char v[256];
+            if (trace_field(sink.buf, "ip", v, sizeof v))
+                snprintf(m->ip, sizeof m->ip, "%s", v);
+            if (trace_field(sink.buf, "colo", v, sizeof v))
+                snprintf(m->colo, sizeof m->colo, "%s", v);
+            if (trace_field(sink.buf, "loc", v, sizeof v))
+                snprintf(m->loc, sizeof m->loc, "%s", v);
+            if (trace_field(sink.buf, "warp", v, sizeof v))
+                snprintf(m->warp, sizeof m->warp, "%s", v);
+            if (trace_field(sink.buf, "tls", v, sizeof v))
+                snprintf(m->tls, sizeof m->tls, "%s", v);
+            if (trace_field(sink.buf, "http", v, sizeof v)) {
+                /* trace reports "http/1.1"; the UI shows it as a protocol. */
+                for (size_t i = 0; v[i] && i < 3; i++)
+                    if (v[i] >= 'a' && v[i] <= 'z') v[i] = (char)(v[i] - 32);
+                snprintf(m->http, sizeof m->http, "%s", v);
+            }
+        }
+        free(sink.buf);
+    }
+
+    /* /meta is kept only for the ASN and cipher fields trace does not expose.
+     * It answers {} for many clients, in which case these simply stay empty and
+     * the views omit the rows rather than printing a zero. */
     {
         Sink sink = {0};
         char url[512];
@@ -367,33 +430,20 @@ void net_fetch_meta(const char *base_url, Meta *m) {
         curl_easy_setopt(c, CURLOPT_WRITEDATA, &sink);
         if (curl_easy_perform(c) == CURLE_OK && sink.buf) {
             char tmp[256];
-            if (json_str(sink.buf, "ip", tmp, sizeof tmp))
-                snprintf(m->ip, sizeof m->ip, "%s", tmp);
-            if (json_str(sink.buf, "colo", tmp, sizeof tmp))
-                snprintf(m->colo, sizeof m->colo, "%s", tmp);
-            if (json_str(sink.buf, "location", tmp, sizeof tmp))
-                snprintf(m->loc, sizeof m->loc, "%s", tmp);
-            if (json_str(sink.buf, "warp", tmp, sizeof tmp))
-                snprintf(m->warp, sizeof m->warp, "%s", tmp);
-            if (json_str(sink.buf, "httpProtocol", tmp, sizeof tmp))
-                snprintf(m->http, sizeof m->http, "%s", tmp);
-
-            /* asnOrg is a nested object; grab its two string fields. */
-            if (json_str(sink.buf, "asnOrg", tmp, sizeof tmp)) { /* object, skip */ }
             const char *p = strstr(sink.buf, "\"asnOrg\"");
             if (p) {
                 const char *o = strchr(p, '{');
                 if (o && json_str(o, "name", tmp, sizeof tmp))
                     snprintf(m->asn_org, sizeof m->asn_org, "%s", tmp);
-                const char *a = strstr(sink.buf, "\"asn\"");
-                if (a && json_str(a, "asn", tmp, sizeof tmp))
-                    snprintf(m->asn, sizeof m->asn, "%s", tmp);
             }
+            const char *a = strstr(sink.buf, "\"asn\"");
+            if (a && json_str(a, "asn", tmp, sizeof tmp))
+                snprintf(m->asn, sizeof m->asn, "%s", tmp);
             const char *t = strstr(sink.buf, "\"tls\"");
             if (t) {
                 const char *o = strchr(t, '{');
                 if (o) {
-                    if (json_str(o, "tlsVersion", tmp, sizeof tmp))
+                    if (json_str(o, "tlsVersion", tmp, sizeof tmp) && !m->tls[0])
                         snprintf(m->tls, sizeof m->tls, "%s", tmp);
                     if (json_str(o, "cipher", tmp, sizeof tmp))
                         snprintf(m->tls_cipher, sizeof m->tls_cipher, "%s", tmp);
