@@ -55,6 +55,19 @@ jobs:
           make
           strip cfspeed.exe || true
 
+      # The pure modules - stats, chart, fmt, actions - carry no libcurl
+      # dependency, so the suite builds and runs without a network.
+      - name: Unit tests (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: make test
+
+      - name: Unit tests (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: msys2 {0}
+        run: |
+          export PATH="/mingw64/bin:$PATH"
+          make test
+
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:

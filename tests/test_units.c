@@ -555,11 +555,17 @@ TEST(chart_scale_of_an_all_zero_array_is_all_zero_not_nan)
     for (int i = 0; i < cs.bars; i++) ASSERT_DBL(cs.h[i], 0.0, 0.0);
 
     /* All-negative counts the same way: nothing was measured, as opposed to
-     * "negative", which is not a thing a bar chart can show. */
+     * "negative", which is not a thing a bar chart can show. mean and p95 are
+     * forced to zero here too, not left at the raw -5.0 -- a negative mean
+     * printed beside a zero-topped axis is a lie about the measurement, and
+     * it is the only observable difference between these two paths. */
     for (size_t i = 0; i < 200; i++) samples[i] = -5.0;
     memset(&cs, 0xAA, sizeof cs);
     chart_scale(samples, 200, 80, &cs);
     ASSERT(cs.zeroed == 1);
+    ASSERT_DBL(cs.peak, 0.0, 0.0);
+    ASSERT_DBL(cs.mean, 0.0, 0.0);
+    ASSERT_DBL(cs.p95, 0.0, 0.0);
     for (int i = 0; i < cs.bars; i++) ASSERT_DBL(cs.h[i], 0.0, 0.0);
 }
 
@@ -1348,6 +1354,48 @@ TEST(actions_enabled_set_matches_the_state)
     /* ITEM_COUNT is not a MenuItem and must not be offered. */
     ASSERT(actions_enabled(ITEM_COUNT, 1, 0) == 0);
     ASSERT(actions_enabled((MenuItem)999, 1, 0) == 0);
+}
+
+TEST(actions_open_starts_at_the_top_regardless_of_where_the_highlight_was)
+{
+    for (size_t s = 0; s < N_STATES; s++) {
+        const int running = k_states[s][0], paused = k_states[s][1];
+        ActionMenu m;
+
+        actions_init(&m);
+        actions_apply(&m, ACTMENU_OPEN, running, paused);
+        for (int i = 0; i < 3; i++) actions_apply(&m, ACTMENU_NAVIGATE, running, paused);
+        ASSERT(m.sel == 3 % m.count);
+
+        /* Close with CANCEL, then reopen: the highlight goes back to the top
+         * rather than resuming a row the user never picked. A menu that
+         * reopens where it was left reads as the app ignoring the key. */
+        actions_apply(&m, ACTMENU_CANCEL, running, paused);
+        ASSERT(m.open == 0);
+        actions_apply(&m, ACTMENU_OPEN, running, paused);
+        ASSERT(m.open == 1);
+        ASSERT(m.sel == 0);
+
+        /* Same after choosing an item, and after a TOGGLE that followed a
+         * longer walk down the list. */
+        for (int i = 0; i < 5; i++) actions_apply(&m, ACTMENU_NAVIGATE, running, paused);
+        ASSERT(m.sel != 0);
+        (void)actions_apply(&m, ACTMENU_TOGGLE, running, paused);
+        actions_apply(&m, ACTMENU_OPEN, running, paused);
+        ASSERT(m.sel == 0);
+        assert_menu_invariant(&m, running, paused, "after reopen");
+
+        /* OPEN on an already-open menu. CANCEL and TOGGLE both zero sel before
+         * a reopen, so the reset can only be observed here: without it the
+         * reopen is a no-op on the highlight and the menu appears to ignore
+         * the key. */
+        for (int i = 0; i < 4; i++) actions_apply(&m, ACTMENU_NAVIGATE, running, paused);
+        ASSERT(m.sel != 0);
+        actions_apply(&m, ACTMENU_OPEN, running, paused);
+        ASSERT(m.open == 1);
+        ASSERT(m.sel == 0);
+        assert_menu_invariant(&m, running, paused, "reopen while open");
+    }
 }
 
 TEST(actions_stale_items_are_poisoned_when_the_set_shrinks)

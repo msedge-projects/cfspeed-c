@@ -151,7 +151,12 @@ int main(int argc, char **argv) {
     int w = 0, h = 0;
     /* Without a console - a pipe, a file, a CI log - there is no size to ask
      * for, and falling back to zero would clamp the screen to a single cell. */
-    if (term_size(&w, &h) != 0 || w < MIN_SCREEN_W || h < MIN_SCREEN_H) {
+    /* Only fall back when there is genuinely no console to ask. A console that
+     * reports a real but small size must be honoured: term_init sized the front
+     * buffer from that same number, and overriding it here made the back buffer
+     * larger than the front, so the renderer composed 120 columns of content
+     * of which only the top-left corner was ever visible. */
+    if (term_size(&w, &h) != 0 || w < 1 || h < 1) {
         env_size(&w, &h);
         if (w < MIN_SCREEN_W) w = 120;
         if (h < MIN_SCREEN_H) h = 40;
@@ -194,7 +199,10 @@ int main(int argc, char **argv) {
 
         Event ev = term_poll();
         if (ev.type == EV_RESIZE) {
-            if (term_size(&w, &h) != 0) continue;
+            /* A failed query must not re-arm the event: continuing without
+             * marking dirty leaves the loop with nothing to draw and the
+             * resize firing again forever. */
+            if (term_size(&w, &h) != 0) { dirty = 1; continue; }
             Screen *ns = screen_create(w, h);
             if (ns) {
                 screen_free(scr);
