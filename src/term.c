@@ -204,7 +204,18 @@ Event term_poll(void) {
         if (c == 0x0d || c == 0x0a) { ev.type = EV_KEY; ev.key = KEY_ENTER; return ev; }
         if (c == 0x09) { ev.type = EV_KEY; ev.key = KEY_TAB; return ev; }
         if (c == 0x08 || c == 0x7f) { ev.type = EV_KEY; ev.key = KEY_BACKSPACE; return ev; }
-        if (c < 0x20) return ev;
+        /* A control byte carries an intent, not a character. Folding it to
+         * Ctrl+<letter> is what makes Ctrl+C reachable at all: dropping it, as
+         * this used to, means the one key a user reaches for to stop a runaway
+         * test never arrives. Tab and Enter are handled above, which is right -
+         * Ctrl+I *is* Tab and Ctrl+M *is* Enter. */
+        if (c < 0x20) {
+            ev.type = EV_KEY;
+            ev.key = KEY_CHAR;
+            ev.ch = (char)(c <= 0x1a ? 'a' + c - 1 : c + 0x40);
+            ev.mods |= CFS_MOD_CTRL;
+            return ev;
+        }
         ev.type = EV_KEY; ev.key = KEY_CHAR; ev.ch = (char)c;
         return ev;
     }
@@ -223,7 +234,11 @@ Event term_poll(void) {
         if (!read_byte((unsigned char *)&c)) return ev;
         while (c >= '0' && c <= '9') { row = row * 10 + (unsigned)(c - '0'); read_byte((unsigned char *)&c); }
         tail = (char)c;
-        if (tail == 'M' && (b & 0x20)) {
+        /* Bits 6 and 7 are the scroll wheel and the extra buttons, and they
+         * share their low two bits with left/middle/right. Masking to b & 0x03
+         * alone collapses wheel-up onto the same mbtn as a real left click, so
+         * scrolling over the tab strip silently flips the user's tab. */
+        if (tail == 'M' && (b & 0x20) && !(b & 0xC0)) {
             ev.type = EV_MOUSE;
             ev.mx = (int)col - 1;
             ev.my = (int)row - 1;
@@ -237,11 +252,15 @@ Event term_poll(void) {
 
     {
         int key = KEY_NONE;
+        /* ESC [ Z is Shift+Tab. The CSI table has no other way to express a
+         * shifted key, so it is the one that needs a side channel. */
+        int shift = 0;
         switch (c) {
             case 'A': key = KEY_UP;    break;
             case 'B': key = KEY_DOWN;  break;
             case 'C': key = KEY_RIGHT; break;
             case 'D': key = KEY_LEFT;  break;
+            case 'Z': key = KEY_TAB; shift = 1; break;
             case 'H': key = KEY_HOME;  break;
             case 'F': key = KEY_END;   break;
             case '~': {
@@ -259,7 +278,11 @@ Event term_poll(void) {
             }
             default: break;
         }
-        if (key != KEY_NONE) { ev.type = EV_KEY; ev.key = key; }
+        if (key != KEY_NONE) {
+            ev.type = EV_KEY;
+            ev.key = key;
+            if (shift) ev.mods |= CFS_MOD_SHIFT;
+        }
         return ev;
     }
 }

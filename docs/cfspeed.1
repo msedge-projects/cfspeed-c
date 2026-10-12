@@ -1,0 +1,255 @@
+.\" Manual page for cfspeed.
+.\"
+.\" Written against src/cli.c, which is the single authoritative parser: the
+.\" flag list, the spelling and the value ranges below are transcribed from
+.\" cli_usage() and cli_parse() rather than from a README, so the two cannot
+.\" disagree without this file being the one that is wrong.
+.TH CFSPEED 1 "2026-10-12" "cfspeed 0.1.0" "User Commands"
+.SH NAME
+cfspeed \- terminal speed test against Cloudflare's public speed endpoints
+.SH SYNOPSIS
+.B cfspeed
+.RI [ options ]
+.SH DESCRIPTION
+.B cfspeed
+measures the quality of an internet connection against the public speed test
+endpoints operated by Cloudflare at
+.BR speed.cloudflare.com .
+A single run reports three things: latency, download throughput and upload
+throughput, each taken against whichever Cloudflare edge the machine's own DNS
+and routing happen to reach.
+.PP
+Latency is sampled as round-trip time in both an idle window, before any
+transfer saturates the link, and a loaded window, while a download is running.
+The difference between the two is reported as bufferbloat: the queueing delay
+the link adds under load. Alongside the medians,
+.B cfspeed
+reports jitter, packet loss and percentiles up to p99, a coefficient of
+variation for throughput stability, and letter grades for the stability and
+bufferbloat figures.
+.PP
+By default the run is presented in a full-screen terminal user interface drawn
+with ANSI escape sequences, in a colour scheme derived from Tokyo Night. The
+interface enables SGR mouse reporting, so the tabs along the top are
+mouse-clickable as well as reachable by keyboard.
+.PP
+.B cfspeed
+is also usable without a terminal, which is the point of most of its options.
+.B \-\-json
+prints a single JSON object on standard output and exits, and
+.B \-\-quiet
+suppresses the human-readable summary. The two headless outputs are produced
+from the same measurement as the interface, not from a second implementation of
+it, so a scripted number and an on-screen number come from one run.
+.PP
+The live view is the interface that is currently wired into the event loop.
+Additional view code for charts, a connection detail sheet, run history and an
+in\-interface key reference exists, but those views are not yet reachable from
+the main loop; the descriptions above describe what a run measures, not a menu
+of tabs that can already be opened.
+.SH OPTIONS
+.TP
+.BR \-p ", " \-\-ping
+Run the latency measurement only. The transfer phases are skipped, so the run
+finishes quickly and consumes almost no bandwidth.
+.TP
+.BR \-d ", " \-\-download
+Run the download measurement only.
+.TP
+.BR \-u ", " \-\-upload
+Run the upload measurement only.
+.TP
+.B \-\-json
+Print one JSON object on standard output, then exit. Implies a headless run: a
+JSON object cannot be produced from a full-screen interface. The object is
+written in a single
+.BR write (2),
+carries no trailing newline, and carries the same field names as the engine's
+own result structure. Units are not encoded in the field names, so throughput is
+in Mbps, latency and bufferbloat are in milliseconds, and loss and stability
+coefficient of variation are percentages.
+.TP
+.BR \-q ", " \-\-quiet
+Suppress the human-readable summary. The summary goes to standard error and the
+JSON object goes to standard output, so
+.B \-\-quiet
+lets a caller take the machine-readable output without the prose.
+.TP
+.BI \-\-iterations " N"
+Run the test
+.I N
+times. The default is 1. The accepted range is 1 to 1000; a value outside it,
+or a value that is not a whole number, is a usage error rather than a silently
+clamped one.
+.TP
+.BI \-\-duration " N"
+Override the duration, in seconds, of each transfer phase. The default, written
+as 0, means use the built-in defaults of 10 seconds per phase. The accepted
+range is 0 to 3600.
+.B \-\-duration
+is an error in ping mode: a ping run has no transfer phase, so the number would
+have nothing to change. It is rejected rather than accepted and ignored.
+.TP
+.BI \-\-out " \fIPATH\fR"
+Also write the JSON summary to
+.IR PATH .
+The path must be at least one character and shorter than 512 characters
+including the terminator. A path cut short by the buffer is refused, because
+writing a result to a name the user never chose is worse than not writing one.
+.TP
+.B \-\-no\-history
+Do not persist this run to the on\-disk history file.
+.TP
+.B \-\-version
+Print the version and exit.
+.TP
+.BR \-h ", " \-\-help
+Print a usage summary and exit.
+.PP
+The three value\-taking options
+.BR \-\-iterations ,
+.B \-\-duration
+and
+.B \-\-out
+accept both the separated form
+.RB ( --duration 15 )
+and the attached form
+.RB ( \-\-duration=15 ).
+The attached form is available for long options only; every short option in this
+program stands alone. A value\-taking option given with no value is treated as a
+typo and ends the run, not as a request for the built\-in default.
+.PP
+An unrecognised argument is an error and ends the run. Silently ignoring a
+misspelled flag is how a user comes to believe they capped a duration that they
+did not cap.
+.SH EXIT STATUS
+.TP
+.B 0
+The run completed,
+.BR \-\-help
+was requested, or
+.B \-\-version
+was requested.
+.TP
+.B 1
+The HTTP client or the terminal could not be initialised.
+.TP
+.B 2
+Usage error: an unknown option, a missing or malformed value for a value\-taking
+option, a value outside the documented range,
+.B \-\-duration
+used in ping mode, or an empty or over\-long
+.B \-\-out
+path.
+.PP
+A run that fails against the network is not a usage error. It reports the
+failure on standard error and leaves a non\-zero, non\-usage status; consult the
+.B valid
+field of the JSON object when using
+.BR \-\-json .
+.SH FILES
+.TP
+.I cfspeed\-ca.pem
+A CA bundle looked for next to the
+.B cfspeed
+executable, and required on Windows.
+.PP
+On Linux and macOS the system trust store is found without help and
+.B cfspeed
+uses it. A Windows
+.BR libcurl (3)
+built against GnuTLS or OpenSSL has no store of its own, so every request would
+otherwise fail peer verification. On Windows,
+.B cfspeed
+therefore loads
+.I cfspeed\-ca.pem
+from the directory holding the executable. The file must be shipped alongside the
+binary. It is not optional and there is no flag to skip it: turning verification
+off would be a security regression in a tool whose entire job is trusting a
+remote endpoint.
+.TP
+.I $XDG_DATA_HOME/cfspeed/history.json
+Run history, as a JSON array with one object per line, oldest first, trimmed to
+the newest 200 runs on save.
+.PP
+The base directory is
+.I $XDG_DATA_HOME
+on Linux and macOS, falling back to
+.IR $HOME ,
+and is
+.I %LOCALAPPDATA%
+on Windows, falling back to
+.IR %USERPROFILE% .
+If neither environment variable is set the path is relative, so history is
+written beside the binary rather than failing every save.
+.B \-\-no\-history
+suppresses writing to this file for one run.
+.SH EXAMPLES
+Measure everything and watch it in the interface:
+.PP
+.RS
+.EX
+cfspeed
+.EE
+.RE
+.PP
+Measure everything without a terminal, taking the JSON:
+.PP
+.RS
+.EX
+cfspeed \-\-json
+.EE
+.RE
+.PP
+Check latency without spending any of the link's bandwidth:
+.PP
+.RS
+.EX
+cfspeed \-\-ping
+.EE
+.RE
+.PP
+Run the full test three times and save the last summary, showing nothing but the
+JSON:
+.PP
+.RS
+.EX
+cfspeed \-\-iterations 3 \-\-quiet \-\-out result.json > /dev/null
+.EE
+.RE
+.PP
+Pin a download run to 30 seconds per phase:
+.PP
+.RS
+.EX
+cfspeed \-\-download \-\-duration 30
+.EE
+.RE
+.PP
+Extract the median idle latency in milliseconds from a scripted run, without
+pulling in a JSON parser:
+.PP
+.RS
+.EX
+cfspeed \-\-ping \-\-json \e
+  | grep \-o '"idle":{"avg":[0-9.]*' \e
+  | cut \-d: \-f3
+.EE
+.RE
+.PP
+Run a test without touching the history file:
+.PP
+.RS
+.EX
+cfspeed \-\-no\-history
+.EE
+.RE
+.SH SEE ALSO
+.BR curl (1),
+.BR ping (1),
+.BR iperf3 (1)
+.PP
+Cloudflare's public speed test endpoints:
+.I https://speed.cloudflare.com
+.SH AUTHORS
+Written for the cfspeed project.

@@ -1,0 +1,50 @@
+# bash completion for cfspeed
+#
+# The option list below is transcribed from cli_usage() in src/cli.c, which is
+# the only place the flags are actually parsed. Value-taking options accept both
+# "--opt value" and "--opt=value", so both shapes are handled here.
+
+_cfspeed() {
+    local cur prev
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+    # Separated form: the previous word is an option that consumes the next one.
+    case "${prev}" in
+        --out)
+            COMPREPLY=( $(compgen -f -- "${cur}") )
+            return 0
+            ;;
+        --iterations|--duration)
+            # Both take a whole number with no completion to suggest.
+            return 0
+            ;;
+    esac
+
+    # Attached form: the value is already being typed after an "=".
+    case "${cur}" in
+        --out=*)
+            local prefix="${cur%%=*}"
+            local stem="${cur#*=}"
+            local i
+            COMPREPLY=( $(compgen -f -- "${stem}") )
+            for i in "${!COMPREPLY[@]}"; do
+                COMPREPLY[i]="${prefix}=${COMPREPLY[i]}"
+            done
+            return 0
+            ;;
+        --iterations=*|--duration=*|--iterations=)
+            return 0
+            ;;
+    esac
+
+    COMPREPLY=( $(compgen -W '--ping --download --upload --json --quiet
+                           --iterations --duration --out --no-history
+                           --version --help
+                           -p -d -u -q -h' -- "${cur}") )
+    return 0
+}
+
+complete -F _cfspeed cfspeed
+complete -F _cfspeed cfspeed.exe

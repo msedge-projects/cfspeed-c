@@ -1,0 +1,20 @@
+# fish completion for cfspeed
+#
+# Transcribed from cli_usage() in src/cli.c.
+#
+# -f on a boolean option says "this option takes no argument, so do not offer
+# filenames here". The three value-taking options use -r (an argument is
+# required) and, for --out, -F to complete file names for that argument.
+
+complete -c cfspeed -f -s p -l ping     -d 'Run the latency measurement only'
+complete -c cfspeed -f -s d -l download -d 'Run the download measurement only'
+complete -c cfspeed -f -s u -l upload   -d 'Run the upload measurement only'
+complete -c cfspeed -f      -l json     -d 'Print one JSON object on stdout and exit'
+complete -c cfspeed -f -s q -l quiet    -d 'Suppress the human-readable summary'
+complete -c cfspeed -f      -l no-history -d 'Do not persist this run'
+complete -c cfspeed -f      -l version  -d 'Print the version and exit'
+complete -c cfspeed -f -s h -l help     -d 'Print a usage summary and exit'
+
+complete -c cfspeed -l iterations -r -d 'Run the test N times (1-1000)'
+complete -c cfspeed -l duration   -r -d 'Override each transfer phase, in seconds (0-3600)'
+complete -c cfspeed -l out        -r -F -d 'Also write the JSON summary to this file'

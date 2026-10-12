@@ -1,0 +1,24 @@
+#compdef cfspeed
+# zsh completion for cfspeed
+#
+# Transcribed from cli_usage() in src/cli.c. _arguments distinguishes the
+# boolean options (no trailing ":" and no action) from the three that take a
+# value (":message:action"), and it handles --opt=value as well as --opt value
+# without any extra work here.
+
+_cfspeed() {
+    _arguments \
+        '(-p --ping)'{-p,--ping}'[run the latency measurement only]' \
+        '(-d --download)'{-d,--download}'[run the download measurement only]' \
+        '(-u --upload)'{-u,--upload}'[run the upload measurement only]' \
+        '--json[print one JSON object on stdout and exit]' \
+        '(-q --quiet)'{-q,--quiet}'[suppress the human-readable summary]' \
+        '--iterations[run the test N times]:iterations (1-1000):' \
+        '--duration[override each transfer phase, in seconds]:seconds (0-3600):' \
+        '--out[also write the JSON summary to this file]:output path:_files' \
+        '--no-history[do not persist this run]' \
+        '--version[print the version and exit]' \
+        '(-h --help)'{-h,--help}'[print a usage summary and exit]'
+}
+
+_cfspeed "$@"

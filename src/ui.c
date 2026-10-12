@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "theme.h"
+#include "views.h"
 
 #define MIN_W 60
 #define MIN_H 14
@@ -243,6 +244,12 @@ static void draw_tiles(Screen *s, int y, int w, const Engine *e) {
 
 /* ------------------------------------------------------------------- nav */
 
+/* Selected row of the HISTORY tab; see ui_set_history_sel. */
+static int g_hist_sel = 0;
+
+void ui_set_history_sel(int row) { g_hist_sel = row < 0 ? 0 : row; }
+int  ui_history_sel(void) { return g_hist_sel; }
+
 static const char *TABS[] = {"LIVE", "CHARTS", "DETAILS", "HISTORY", "HELP"};
 #define TAB_N ((int)(sizeof(TABS) / sizeof(TABS[0])))
 
@@ -269,7 +276,7 @@ void draw_tab_count(Screen *s, int y, int w, int sel) { draw_nav(s, y, w, sel); 
 
 /* -------------------------------------------------------------- top draw */
 
-void ui_draw(Screen *s, const Engine *e, int tab) {
+void ui_draw(Screen *s, const Engine *e, const History *hist, int tab, int zoom) {
     screen_clear(s);
     int w = s->w, h = s->h;
 
@@ -278,6 +285,17 @@ void ui_draw(Screen *s, const Engine *e, int tab) {
         snprintf(msg, sizeof msg, "Terminal too small\nneed at least %dx%d", MIN_W, MIN_H);
         cell_text(s, 0, 0, w, msg, T_TEXT_DIM, BG_NONE, 0);
         return;
+    }
+
+    /* Tabs 1-4 own the whole body. Dispatching before the error banner keeps
+     * DETAILS and HISTORY reachable after a failed run - losing the result is
+     * exactly when the user most wants to read why it failed. */
+    switch (tab) {
+        case 1: view_charts(s, e, hist);  draw_nav(s, h - 1, w, tab); return;
+        case 2: view_details(s, e, hist); draw_nav(s, h - 1, w, tab); return;
+        case 3: view_history(s, e, hist, g_hist_sel); draw_nav(s, h - 1, w, tab); return;
+        case 4: view_help(s, e, hist);    draw_nav(s, h - 1, w, tab); return;
+        default: break;
     }
 
     const char *err = engine_error(e);
@@ -300,6 +318,14 @@ void ui_draw(Screen *s, const Engine *e, int tab) {
     const double *ds = engine_down_samples(e, &nd);
     const double *us = engine_up_samples(e, &nu);
     const RunResult *r = engine_result(e);
+
+    /* Zoom keeps the tail of each series, so a higher zoom spends the same
+     * chart width on a shorter window instead of rescaling the y axis. */
+    if (zoom > 1) {
+        int dn = nd / zoom, un = nu / zoom;
+        if (dn > 0) { ds += nd - dn; nd = dn; }
+        if (un > 0) { us += nu - un; nu = un; }
+    }
 
     double dmax = r->down.max > 0 ? r->down.max : 1.0;
     double umax = r->up.max > 0 ? r->up.max : 1.0;
