@@ -75,18 +75,27 @@ jobs:
           # versioned script can be run and tested on its own.
           bash scripts/collect-dlls.sh
 
-      - name: Package
+      # Git Bash on the Windows runners has no `zip`, so that platform uses
+      # PowerShell's archiver instead. Both steps write the same flat layout:
+      # the exe, the runtime DLLs and the CA bundle in one directory.
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path stage/* -DestinationPath dist/cfspeed-${{ matrix.asset }}.zip
+          if (-not (Test-Path dist/cfspeed-${{ matrix.asset }}.zip)) {
+            Write-Error 'zip was not created'
+            exit 1
+          }
+
+      - name: Package (Linux/macOS)
+        if: matrix.os != 'windows-latest'
         shell: bash
         run: |
           mkdir -p dist
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            cp stage/* dist/
-            (cd dist && zip -q cfspeed-${{ matrix.asset }}.zip *)
-            test -f dist/cfspeed-${{ matrix.asset }}.zip
-          else
-            cp cfspeed dist/cfspeed-${{ matrix.asset }}
-            tar -czf dist/cfspeed-${{ matrix.asset }}.tar.gz -C dist cfspeed-${{ matrix.asset }}
-          fi
+          cp cfspeed dist/cfspeed-${{ matrix.asset }}
+          tar -czf dist/cfspeed-${{ matrix.asset }}.tar.gz -C dist cfspeed-${{ matrix.asset }}
 
       - uses: actions/upload-artifact@v4
         with:
