@@ -4,13 +4,14 @@
 # the measurement engine never talks to it directly.
 
 CC      ?= cc
-CFLAGS  ?= -O2 -std=c11 -Wall -Wextra -Wno-unused-parameter
+CFLAGS  ?= -O2 -std=gnu11 -Wall -Wextra -Wno-unused-parameter
 LDFLAGS ?=
 LDLIBS  := -lcurl -lm
 
-UNAME_S := $(shell uname -s 2>/dev/null || echo Windows)
-ifeq ($(UNAME_S),Windows)
-  LDLIBS += -lpthread
+# Winsock for name resolution and address formatting on Windows. Detected from
+# the compiler rather than `uname`, which MSYS2 does not always provide.
+ifeq ($(OS),Windows_NT)
+  LDLIBS += -lws2_32 -lpthread
 endif
 
 SRC := src/main.c src/term.c src/net.c src/engine.c src/ui.c
