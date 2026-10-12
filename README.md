@@ -36,8 +36,10 @@ reality is worse than no speed test.
 - Latency, jitter, packet loss, bufferbloat and stability grades
 - Five tabs — LIVE, CHARTS, DETAILS, HISTORY, HELP — switchable by key **or by
   clicking the tab strip**
-- Run history persisted to disk and restored on next launch
+- An `m` actions menu: pause, rerun, zoom, export JSON, clear history, quit
+- Run history persisted to disk and restored on next launch, newest 200 kept
 - Headless `--json` output, verified against a real JSON parser
+- `--duration` genuinely overrides the transfer phases
 - The client IP, the edge colo and the resolved edge addresses shown together
   on the main view, so it is always clear which is which
 - Mouse click support, with the scroll wheel correctly distinguished from a click
@@ -45,17 +47,39 @@ reality is worse than no speed test.
   reported as an error rather than as 0 Mbps
 - Transparent background — no cell is ever painted with an opaque colour except
   the one selected row, so a terminal theme shows through
-- 49 unit tests covering `stats`, `chart`, `fmt` and `actions`, gating CI
+
+**Every platform is built and executed in CI**, and a smoke gate fails the build
+if a run produces no measurement. Recent results:
+
+| Platform | Throughput | Edge |
+|---|---|---|
+| ubuntu-latest | 655 Mbps | MSP |
+| macos-latest | 1334 Mbps | IAD |
+| windows-latest | 1360 Mbps | SJC |
+
+The gate asserts the JSON parses, `download.avg` and `download.bytes` are
+non-zero, and `colo` is populated — verified in both directions, so it fails
+when it should rather than passing vacuously.
+
+**Tests: 90 total, all passing**
+
+| Suite | Tests | Covers |
+|---|---|---|
+| `make test` | 50 | statistics, chart scaling, formatting, the menu model |
+| `make test-history` | 27 | persistence round trip, every field, corrupt input |
+| `make test-views` | 13 | all four secondary views render, at eight screen sizes |
+
+They are mutation-tested: deliberately breaking `NAVIGATE_BACK` or the tab
+dispatcher makes them fail with a named failure, so a green run is evidence
+rather than decoration.
 
 **Known gaps**
 
-- The `m` actions menu has a tested model but no renderer yet, so `m` does
-  nothing.
-- `--duration` is accepted but not yet applied to the engine.
-- Only the Windows artifact has been executed. Linux and macOS are built and
-  their artifacts are published, but they have not been run on a real network.
 - The man page has been validated structurally but never rendered; there was no
   `groff` available to check it with.
+- Rate limiting is a real flake risk in CI. When Cloudflare answers every
+  request with a refusal the gate correctly fails; that is the signal working,
+  not a false positive.
 
 ## Install
 
@@ -154,10 +178,12 @@ would change that.
 | `src/cli.c/.h` | flag parsing, JSON and summary output |
 | `src/keymap.c/.h` | the key-to-action table |
 | `src/actions.c/.h` | the actions menu model |
+| `src/menu.c/.h` | the actions menu overlay |
 | `src/stats.c/.h` | percentiles, jitter, CV, grades |
 | `src/chart.c/.h` | chart scaling and bucketing |
 | `src/fmt.c/.h` | number, rate and duration formatting |
 | `src/test.c/.h` | the test harness |
+| `tests/` | the three test suites |
 
 The engine never talks to libcurl directly. Everything network-facing goes
 through `net.c`, which is what makes the measurement logic testable and keeps

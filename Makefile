@@ -47,7 +47,13 @@ test-history: $(HISTTEST)
 	$(CC) $(CFLAGS) -Isrc -o test_history $^ $(LDFLAGS) -lm
 	./test_history
 
-clean:
-	rm -f $(OBJ) $(BIN) test_units test_history
+VIEWSMODS := src/views.c src/term.c src/history.c src/fmt.c src/chart.c src/stats.c
 
-.PHONY: all clean test test-history
+test-views: tests/test_views_render.c src/test.c $(VIEWSMODS)
+	$(CC) $(CFLAGS) -Isrc -o test_views $^ $(LDFLAGS) -lm
+	./test_views
+
+clean:
+	rm -f $(OBJ) $(BIN) test_units test_history test_views
+
+.PHONY: all clean test test-history test-views

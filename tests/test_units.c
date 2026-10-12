@@ -1459,9 +1459,10 @@ TEST(actions_every_op_in_every_state_keeps_the_invariant)
      * opened menu and to a closed one. Each case checks the invariant, the
      * state of `open`, and the return value. */
     static const MenuOp ops[] = {
-        ACTMENU_NONE, ACTMENU_OPEN, ACTMENU_NAVIGATE, ACTMENU_TOGGLE, ACTMENU_CANCEL
+        ACTMENU_NONE, ACTMENU_OPEN, ACTMENU_NAVIGATE, ACTMENU_NAVIGATE_BACK,
+        ACTMENU_TOGGLE, ACTMENU_CANCEL
     };
-    static const char *op_names[] = { "NONE", "OPEN", "NAVIGATE", "TOGGLE", "CANCEL" };
+    static const char *op_names[] = { "NONE", "OPEN", "NAVIGATE", "NAVIGATE_BACK", "TOGGLE", "CANCEL" };
 
     for (size_t s = 0; s < N_STATES; s++) {
         const int running = k_states[s][0], paused = k_states[s][1];
@@ -1509,6 +1510,17 @@ TEST(actions_every_op_in_every_state_keeps_the_invariant)
                     ASSERT(from_open.open == 1);
                     ASSERT(from_open.sel == 1); /* sel was 0 and count >= 7 */
                     /* A closed menu has nothing to move. */
+                    ASSERT(got_closed == ITEM_COUNT);
+                    ASSERT(from_closed.sel == 0);
+                    break;
+                case ACTMENU_NAVIGATE_BACK:
+                    /* Backwards from the top row wraps to the last, which is
+                     * the same wrap the forward direction uses. Without this
+                     * case the two directions would be indistinguishable and a
+                     * NAVIGATE_BACK that silently moved forward would pass. */
+                    ASSERT(got_open == ITEM_COUNT);
+                    ASSERT(from_open.open == 1);
+                    ASSERT(from_open.sel == from_open.count - 1);
                     ASSERT(got_closed == ITEM_COUNT);
                     ASSERT(from_closed.sel == 0);
                     break;
@@ -1565,6 +1577,33 @@ TEST(actions_toggle_on_a_closed_menu_chooses_nothing)
     /* A NULL menu is a caller that has not built one yet, not a crash. */
     ASSERT(actions_apply(NULL, ACTMENU_TOGGLE, 1, 0) == ITEM_COUNT);
     actions_init(NULL);
+}
+
+TEST(actions_navigate_back_moves_the_highlight_the_other_way)
+{
+    ActionMenu m;
+    actions_init(&m);
+    actions_apply(&m, ACTMENU_OPEN, 1, 0);
+    ASSERT(m.open == 1);
+    ASSERT(m.count >= 4);
+    int n = m.count;
+
+    int at = m.sel;
+    for (int i = 0; i < n; i++) {
+        actions_apply(&m, ACTMENU_NAVIGATE_BACK, 1, 0);
+        int want = (at + n - 1) % n;
+        if (m.sel != want)
+            FAIL_MSG("back from %d gave %d, want %d", at, m.sel, want);
+        at = m.sel;
+    }
+    /* A full lap backwards returns to where it started. */
+    ASSERT(at == 0);
+
+    /* And the forward direction still steps the opposite way from the top. */
+    actions_apply(&m, ACTMENU_NAVIGATE_BACK, 1, 0);
+    ASSERT(m.sel == n - 1);
+    actions_apply(&m, ACTMENU_NAVIGATE, 1, 0);
+    ASSERT(m.sel == 0);
 }
 
 TEST(actions_navigate_wraps_and_never_lands_on_a_disabled_row)
@@ -1634,7 +1673,8 @@ TEST(actions_garbage_and_zero_initialised_menus_are_repaired)
      * 0xFF makes `open` truthy, sel enormous, count nonsense and every item
      * slot a value that is not a MenuItem. */
     static const MenuOp ops[] = {
-        ACTMENU_NONE, ACTMENU_OPEN, ACTMENU_NAVIGATE, ACTMENU_TOGGLE, ACTMENU_CANCEL
+        ACTMENU_NONE, ACTMENU_OPEN, ACTMENU_NAVIGATE, ACTMENU_NAVIGATE_BACK,
+        ACTMENU_TOGGLE, ACTMENU_CANCEL
     };
 
     for (size_t s = 0; s < N_STATES; s++) {
@@ -1743,7 +1783,8 @@ TEST(actions_fuzz_all_ops_in_random_order_holds_the_invariant)
      * of transition. */
     enum { STEPS = 30000 };
     static const MenuOp ops[] = {
-        ACTMENU_NONE, ACTMENU_OPEN, ACTMENU_NAVIGATE, ACTMENU_TOGGLE, ACTMENU_CANCEL
+        ACTMENU_NONE, ACTMENU_OPEN, ACTMENU_NAVIGATE, ACTMENU_NAVIGATE_BACK,
+        ACTMENU_TOGGLE, ACTMENU_CANCEL
     };
     ActionMenu m;
     int running = 0, paused = 0;
