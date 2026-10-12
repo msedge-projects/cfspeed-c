@@ -7,15 +7,13 @@
 
 /* ------------------------------------------------------------------ stats */
 
-#if !CFS_CHART_HAVE_STATS_H
-/* Local fallback for the sibling stats.h, which is being authored alongside
- * this file. chart.c stays linkable either way by owning its own order
- * statistics; it deliberately does not bind to a shared symbol name, because
- * a speculative prototype is a worse failure mode than a private copy. */
+/* chart.c owns its own order statistic rather than calling into stats.h.
+ * stats.h's stats_percentile is nearest-rank, but ui.c prints the
+ * linearly-interpolated p95 that engine.c computes, so delegating would
+ * quietly change the number on screen. Keeping a private copy also makes
+ * chart.c linkable with no other object and allocates nothing, whereas the
+ * shared helpers must sort, which means malloc. */
 static double chart_local_percentile(const double *s, size_t n, double p);
-#else
-static double chart_local_percentile(const double *s, size_t n, double p);
-#endif
 
 /* k-th smallest finite sample, k 1-based over the finite ones only, in O(1)
  * memory and no allocation.

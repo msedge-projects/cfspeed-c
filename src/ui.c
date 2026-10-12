@@ -253,6 +253,21 @@ int  ui_history_sel(void) { return g_hist_sel; }
 static const char *TABS[] = {"LIVE", "CHARTS", "DETAILS", "HISTORY", "HELP"};
 #define TAB_N ((int)(sizeof(TABS) / sizeof(TABS[0])))
 
+/* The tab strip sits on the LAST row, not row 0: row 0 carries the title.
+ * keymap's KM_TAB_ROW is 0 because it reasons about a bare strip, which is why
+ * the click is resolved here, next to the geometry that draws it. */
+int ui_hit_tab(int col, int row, int w, int h) {
+    if (row != h - 1 || col < 0 || w <= 0) return -1;
+    int x = 0;
+    for (int i = 0; i < TAB_N; i++) {
+        int tw = (int)strlen(TABS[i]) + 2;
+        if (x + tw > w) break;
+        if (col >= x && col < x + tw) return i;
+        x += tw + 1;
+    }
+    return -1;
+}
+
 static void draw_nav(Screen *s, int y, int w, int sel) {
     int x = 0;
     for (int i = 0; i < TAB_N; i++) {

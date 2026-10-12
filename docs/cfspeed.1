@@ -30,8 +30,22 @@ bufferbloat figures.
 .PP
 By default the run is presented in a full-screen terminal user interface drawn
 with ANSI escape sequences, in a colour scheme derived from Tokyo Night. The
-interface enables SGR mouse reporting, so the tabs along the top are
-mouse-clickable as well as reachable by keyboard.
+interface enables SGR mouse reporting, and the tab strip along the top is
+mouse\-clickable as well as reachable from the keyboard. Five views exist:
+.BR LIVE ,
+.BR CHARTS ,
+.BR DETAILS ,
+.BR HISTORY
+and
+.BR HELP .
+They are selected with the number keys 1 to 5, with
+.B ?
+for help, and with
+.B Tab
+and
+.B "Shift\-Tab"
+to step forwards and backwards. What each view draws is the subject of its own
+source; this page documents the command line, not the contents of the views.
 .PP
 .B cfspeed
 is also usable without a terminal, which is the point of most of its options.
@@ -42,11 +56,19 @@ suppresses the human-readable summary. The two headless outputs are produced
 from the same measurement as the interface, not from a second implementation of
 it, so a scripted number and an on-screen number come from one run.
 .PP
-The live view is the interface that is currently wired into the event loop.
-Additional view code for charts, a connection detail sheet, run history and an
-in\-interface key reference exists, but those views are not yet reachable from
-the main loop; the descriptions above describe what a run measures, not a menu
-of tabs that can already be opened.
+A run is headless when
+.B \-\-json
+is given, because a JSON object cannot be produced from a full-screen interface.
+The options that govern such a run are
+.BR \-\-iterations ,
+.B \-\-quiet
+and
+.BR \-\-out ;
+they describe a run that starts, finishes and exits on its own, and they have
+nothing to act on when the interface stays up between phases. A headless run is
+never written to the history file, whatever
+.B \-\-no-history
+says.
 .SH OPTIONS
 .TP
 .BR \-p ", " \-\-ping
@@ -62,33 +84,45 @@ Run the upload measurement only.
 .B \-\-json
 Print one JSON object on standard output, then exit. Implies a headless run: a
 JSON object cannot be produced from a full-screen interface. The object is
-written in a single
-.BR write (2),
-carries no trailing newline, and carries the same field names as the engine's
-own result structure. Units are not encoded in the field names, so throughput is
-in Mbps, latency and bufferbloat are in milliseconds, and loss and stability
-coefficient of variation are percentages.
+written with a single
+.BR write (2)
+and is followed by a newline, so a consumer reading a pipe sees it whole. Its
+field names match the engine's own result structure. Units are not encoded in
+the field names, so throughput is in Mbps, latency and bufferbloat are in
+milliseconds, and loss and stability coefficient of variation are percentages.
+Non-finite numbers, which a degenerate window can produce, are written as
+.B null
+rather than as a value JSON cannot spell.
 .TP
 .BR \-q ", " \-\-quiet
 Suppress the human-readable summary. The summary goes to standard error and the
 JSON object goes to standard output, so
 .B \-\-quiet
-lets a caller take the machine-readable output without the prose.
+lets a caller take the machine-readable output without the prose. It applies to
+headless runs; the interface does not print that summary in the first place.
 .TP
 .BI \-\-iterations " N"
 Run the test
 .I N
 times. The default is 1. The accepted range is 1 to 1000; a value outside it,
 or a value that is not a whole number, is a usage error rather than a silently
-clamped one.
+clamped one. Each run after the first restarts the engine, so the iterations are
+sequential rather than concurrent. This governs headless runs only; in the
+interface a test is re\-run with
+.BR r .
 .TP
 .BI \-\-duration " N"
 Override the duration, in seconds, of each transfer phase. The default, written
-as 0, means use the built-in defaults of 10 seconds per phase. The accepted
+as 0, means use the built\-in defaults of 10 seconds per phase. The accepted
 range is 0 to 3600.
 .B \-\-duration
 is an error in ping mode: a ping run has no transfer phase, so the number would
 have nothing to change. It is rejected rather than accepted and ignored.
+.PP
+The value is currently parsed and validated but not handed to the measurement
+engine, so a transfer phase still runs for its built\-in length. The option is
+described here as the parser accepts it, not as a guarantee about the length of
+a run.
 .TP
 .BI \-\-out " \fIPATH\fR"
 Also write the JSON summary to
@@ -96,9 +130,17 @@ Also write the JSON summary to
 The path must be at least one character and shorter than 512 characters
 including the terminator. A path cut short by the buffer is refused, because
 writing a result to a name the user never chose is worse than not writing one.
+.PP
+The file receives the same bytes as standard output, so the two can never
+disagree: it is the same serialiser writing through a redirected stream rather
+than a second copy of the document. Unlike standard output, the file is not
+given a trailing newline. The file is written when the run finishes, which for
+this option means a headless run; it is not written by the interface.
 .TP
 .B \-\-no-history
-Do not persist this run to the on\-disk history file.
+Do not persist this run to the on\-disk history file. The history belongs to the
+interface, which is where a run is recorded on finish; a headless run never
+reaches that code and is never recorded either way.
 .TP
 .B \-\-version
 Print the version and exit.
@@ -112,7 +154,7 @@ The three value\-taking options
 and
 .B \-\-out
 accept both the separated form
-.RB ( --duration 15 )
+.RB ( \-\-duration 15 )
 and the attached form
 .RB ( \-\-duration=15 ).
 The attached form is available for long options only; every short option in this
@@ -127,26 +169,35 @@ did not cap.
 .B 0
 The run completed,
 .BR \-\-help
-was requested, or
+was requested,
 .B \-\-version
-was requested.
+was requested, or the interface was opened and then closed.
 .TP
 .B 1
-The HTTP client or the terminal could not be initialised.
+The HTTP client, the engine, the terminal or the screen could not be
+initialised.
 .TP
 .B 2
-Usage error: an unknown option, a missing or malformed value for a value\-taking
-option, a value outside the documented range,
+Either a usage error or a failed run, in a headless invocation.
+.PP
+A usage error is an unknown option, a missing or malformed value for a
+value\-taking option, a value outside the documented range,
 .B \-\-duration
 used in ping mode, or an empty or over\-long
 .B \-\-out
 path.
 .PP
-A run that fails against the network is not a usage error. It reports the
-failure on standard error and leaves a non\-zero, non\-usage status; consult the
+The same status also covers two failures that are not usage errors, so that a
+script can test one value rather than two: a headless run that produced no valid
+result, and a
+.B \-\-out
+file that could not be written. Both are reported on standard error before the
+run exits. Distinguish them by the message on that stream, or by reading the
 .B valid
 field of the JSON object when using
 .BR \-\-json .
+A run that fails from the interface does not exit at all: the failure is shown
+and the interface stays up.
 .SH FILES
 .TP
 .I cfspeed\-ca.pem
@@ -168,20 +219,20 @@ binary. It is not optional and there is no flag to skip it: turning verification
 off would be a security regression in a tool whose entire job is trusting a
 remote endpoint.
 .TP
-.I $XDG_DATA_HOME/cfspeed/history.json
+.I $HOME/cfspeed/history.json
 Run history, as a JSON array with one object per line, oldest first, trimmed to
 the newest 200 runs on save.
 .PP
 The base directory is
-.I $XDG_DATA_HOME
+.I $HOME
 on Linux and macOS, falling back to
-.IR $HOME ,
+.IR $XDG_DATA_HOME ,
 and is
 .I %LOCALAPPDATA%
 on Windows, falling back to
 .IR %USERPROFILE% .
-If neither environment variable is set the path is relative, so history is
-written beside the binary rather than failing every save.
+If none of those environment variables is set the path is relative, so history
+is written beside the binary rather than failing every save.
 .B \-\-no-history
 suppresses writing to this file for one run.
 .SH EXAMPLES
@@ -209,16 +260,18 @@ cfspeed \-\-ping
 .EE
 .RE
 .PP
-Run the full test three times and save the last summary, showing nothing but the
-JSON:
+Run the full test three times and write the last result to a file, keeping the
+summary off the terminal:
 .PP
 .RS
 .EX
-cfspeed \-\-iterations 3 \-\-quiet \-\-out result.json > /dev/null
+cfspeed \-\-iterations 3 \-\-quiet \-\-out result.json
 .EE
 .RE
 .PP
-Pin a download run to 30 seconds per phase:
+Request 30-second transfer phases on a download run. The value is accepted and
+range\-checked, but the phase length is not yet applied, so the phase still runs
+for its built\-in length:
 .PP
 .RS
 .EX
@@ -226,8 +279,12 @@ cfspeed \-\-download \-\-duration 30
 .EE
 .RE
 .PP
-Extract the median idle latency in milliseconds from a scripted run, without
-pulling in a JSON parser:
+Extract the mean idle latency in milliseconds from a scripted run, without
+pulling in a JSON parser. The
+.B idle
+object is the one measured before any transfer; the parallel
+.B loaded
+object is the one taken while the link is saturated:
 .PP
 .RS
 .EX

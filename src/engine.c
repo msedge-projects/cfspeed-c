@@ -167,6 +167,71 @@ static void summarise_latency(double *s, int n, LatStats *out) {
 
 /* ------------------------------------------------------------- lifecycle */
 
+/* Wall-clock stamp for RunResult.timestamp_ms, in Unix epoch milliseconds.
+ * One helper so engine_new and engine_restart cannot drift apart in units - a
+ * mismatch here is invisible until the history table prints nonsense. */
+static uint64_t stamp_now_ms(void) {
+    return (uint64_t)time(NULL) * 1000u;
+}
+
+/* Clear a RunResult for a new run, keeping the connection metadata.
+ *
+ * `meta` is deliberately preserved, and this is the decision worth arguing
+ * about. net_fetch_meta() is called exactly once, in engine_new(), and it is
+ * the only writer of meta; a blanket memset here therefore did not "reset the
+ * meta for the new run", it deleted it, permanently, on the first keypress.
+ * The DETAILS view then showed an empty COLO, an empty client IP and an empty
+ * ASN for the rest of the session, and the history table showed 00:00:00
+ * forever. That was the largest single source of wrong data in the program.
+ *
+ * The alternative is to refetch on every restart, and it loses on two counts.
+ * First, cost and placement: net_fetch_meta() is a blocking getaddrinfo plus
+ * two HTTPS round trips, and engine_restart() is called straight from the key
+ * handler in main.c, so a refetch there stalls the UI thread on every f/p/d/u/r
+ * press for data that is the same data. Second, and worse, it is not
+ * idempotent under failure: net_fetch_meta() zeroes its output before it
+ * tries, so a single refetch that lost a race with the rate limiter would
+ * replace good metadata with blank fields. A stale colo is a much smaller lie
+ * than an absent one.
+ *
+ * The real argument for refetching is a long session whose machine moves
+ * between networks. That is the scenario where stale metadata is wrong, and it
+ * is exactly the scenario where restarting the app is already the answer.
+ *
+ * Everything else IS cleared, because it belongs to the run rather than to the
+ * connection:
+ *   - valid and the two grades must not survive. The views branch on them to
+ *     decide whether a finished result exists at all, so a leftover "A+" would
+ *     label a run that has not started yet.
+ *   - down/up/idle/loaded_down must not survive. A phase abandoned halfway
+ *     through has already written its byte count and its latency figures, and
+ *     without this the next run would report them as its own until it reached
+ *     the same point. For MODE_DOWNLOAD and MODE_UPLOAD, which never write
+ *     the other direction at all, that stale half-run is the only number the
+ *     summary line will ever show.
+ *   - bufferbloat_ms and stability_cv are derived from the above and would
+ *     otherwise describe a run that no longer exists.
+ */
+static void result_reset(RunResult *r) {
+    memset(&r->down, 0, sizeof r->down);
+    memset(&r->up, 0, sizeof r->up);
+    memset(&r->idle, 0, sizeof r->idle);
+    memset(&r->loaded_down, 0, sizeof r->loaded_down);
+    r->bufferbloat_ms = 0.0;
+    r->stability_cv   = 0.0;
+    r->stab_grade[0]  = '\0';
+    r->bloat_grade[0] = '\0';
+    r->valid = 0;
+
+    /* Re-stamped rather than carried over. Two runs a few seconds apart share
+     * a wall-clock second often enough that two identical stamps in the
+     * history table would be indistinguishable, and the stamp on screen is
+     * supposed to mean "this run started now". Second resolution is already
+     * enough: the shortest run this engine can produce is the 2 s idle phase
+     * in MODE_LATENCY, so two rows can never be recorded inside one second. */
+    r->timestamp_ms = stamp_now_ms();
+}
+
 Engine *engine_new(const char *base_url, Mode mode) {
     Engine *e = (Engine *)calloc(1, sizeof *e);
     if (!e) return NULL;
@@ -175,11 +240,12 @@ Engine *engine_new(const char *base_url, Mode mode) {
     e->phase = PH_IDLE;
     e->run_start = now_ms();
     e->phase_start = e->run_start;
+    e->phase_end = e->run_start;
     e->chunk = CHUNK_START;
     /* Metadata is a precondition for showing the route at all, and it is a
      * handful of requests; doing it up front keeps it off the measured path. */
     net_fetch_meta(e->base, &e->result.meta);
-    e->result.timestamp_ms = (uint64_t)time(NULL) * 1000u;
+    e->result.timestamp_ms = stamp_now_ms();
     return e;
 }
 
@@ -239,6 +305,7 @@ void engine_restart(Engine *e, Mode mode) {
     engine_cancel(e);
     e->mode = mode;
     e->phase = PH_IDLE;
+    e->phase_end = 0;
     e->finished = 0;
     e->ndown = e->nup = 0;
     e->nidle = e->nloaded = 0;
@@ -249,7 +316,24 @@ void engine_restart(Engine *e, Mode mode) {
     e->run_start = e->last_time;
     e->phase_start = e->last_time;
     e->error[0] = '\0';
-    memset(&e->result, 0, sizeof e->result);
+
+    /* The sample buffers are deliberately not zeroed, only their counts. Every
+     * reader - the live charts, summarise_latency, stats_finalise - is bounded
+     * by nidle/nloaded/ndown/nup, so the stale values past the count are
+     * unreachable, and clearing 25 KiB of doubles on every keypress would be a
+     * cost paid for nothing. */
+
+    /* The shared byte counter is the one piece of partial state that lives
+     * outside RunResult and is not covered by result_reset. start_workers()
+     * zeroes it too, but only when the first transfer phase begins - two
+     * seconds later. Zeroing it here means an abandoned download's bytes are
+     * gone the moment the run is superseded, rather than merely unreachable
+     * until a phase happens to overwrite them. */
+    e->counter = 0;
+
+    /* Keeps the connection metadata and re-stamps the clock; clears the
+     * results, grades and validity of the run being abandoned. */
+    result_reset(&e->result);
 }
 
 /* ---------------------------------------------------------------- phases */

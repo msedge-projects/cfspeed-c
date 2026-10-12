@@ -12,6 +12,11 @@
  * engine's own so there is one vocabulary to learn, which means units are not
  * carried in the names: throughput is Mbps, latency and bufferbloat are ms,
  * loss and stability_cv are percent, bytes is bytes.
+ *
+ * The same vocabulary is the one history.c writes, key for key and container
+ * for container. That is deliberate: a record from this file drops into a
+ * history file and a record out of one loads here, and neither side has to
+ * know which of the two produced a given line.
  */
 #include "cli.h"
 
@@ -277,11 +282,18 @@ static void jnum(Buf *b, double v) {
 static void jstr(Buf *b, const char *s) {
     static const char hex[] = "0123456789abcdef";
     if (!s) s = "";
+    /* Writing past a cut document would leave it longer than cap with no
+     * record of the damage, and the caller only knows to discard it because
+     * cut is set. So the flag is honoured on entry and raised on the way out,
+     * exactly as bput would. */
+    if (b->cut) return;
     bput(b, "\"");
     for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
         unsigned char c = *p;
+        /* Six bytes is the most one source byte can become (\uXXXX), so this
+         * single test covers every branch below. */
+        if (b->len + 7 > b->cap) { b->cut = 1; return; }
         if (c == '"' || c == '\\') {
-            if (b->len + 3 > b->cap) break;
             b->p[b->len++] = '\\';
             b->p[b->len++] = (char)c;
         } else if (c < 0x20) {
@@ -289,11 +301,9 @@ static void jstr(Buf *b, const char *s) {
                            : (c == '\t') ? "\\t" : (c == '\b') ? "\\b"
                            : (c == '\f') ? "\\f" : NULL;
             if (esc) {
-                if (b->len + 3 > b->cap) break;
                 b->p[b->len++] = esc[0];
                 b->p[b->len++] = esc[1];
             } else {
-                if (b->len + 7 > b->cap) break;
                 b->p[b->len++] = '\\';
                 b->p[b->len++] = 'u';
                 b->p[b->len++] = '0';
@@ -302,7 +312,6 @@ static void jstr(Buf *b, const char *s) {
                 b->p[b->len++] = hex[c & 0x0F];
             }
         } else {
-            if (b->len + 2 > b->cap) break;
             b->p[b->len++] = (char)c;
         }
     }
@@ -436,11 +445,18 @@ void cli_json(const Engine *e) {
     char iso[32];
     iso8601(r->timestamp_ms, iso, sizeof iso);
 
-    bput(&b, "{\"timestamp\":\"%s\",\"timestamp_ms\":%llu", iso,
-         (unsigned long long)r->timestamp_ms);
-    bput(&b, ",\"mode\":\"%s\",\"phase\":\"%s\",\"valid\":%s",
-         mode_name(engine_mode(e)), phase_label(engine_phase(e)),
-         r->valid ? "true" : "false");
+    /* Everything that lands inside a quoted token goes through jstr. iso8601
+     * and the two label tables produce a fixed shape today, but a raw %s
+     * would make a quote in any of them break the document for every consumer
+     * downstream, and one writer rule is cheaper than auditing three callers. */
+    bput(&b, "{\"timestamp\":");
+    jstr(&b, iso);
+    bput(&b, ",\"timestamp_ms\":%llu", (unsigned long long)r->timestamp_ms);
+    bput(&b, ",\"mode\":");
+    jstr(&b, mode_name(engine_mode(e)));
+    bput(&b, ",\"phase\":");
+    jstr(&b, phase_label(engine_phase(e)));
+    bput(&b, ",\"valid\":%s", r->valid ? "true" : "false");
     bput(&b, ",\"error\":");
     jstr(&b, engine_error(e));
     bput(&b, ",");
@@ -545,9 +561,16 @@ void cli_summary(const Engine *e) {
              m->colo[0] ? m->colo : "?", m->loc[0] ? m->loc : "?");
     fputs(line, stderr);
 
-    snprintf(line, sizeof line, "  you    %s \xc2\xb7 %s%s%s\n", m->ip[0] ? m->ip : "?",
-             m->asn_org[0] ? m->asn_org : "?",
-             m->asn[0] ? " (AS" : "", m->asn[0] ? m->asn : "");
+    /* The AS number is optional because the endpoint does not always return one;
+     * the parenthesis belongs to it, so it is emitted with the number or not
+     * at all - a bare "(" with nothing to close reads as a truncated line. */
+    if (m->asn[0])
+        snprintf(line, sizeof line, "  you    %s \xc2\xb7 %s (AS%s)\n",
+                 m->ip[0] ? m->ip : "?", m->asn_org[0] ? m->asn_org : "?",
+                 m->asn);
+    else
+        snprintf(line, sizeof line, "  you    %s \xc2\xb7 %s\n",
+                 m->ip[0] ? m->ip : "?", m->asn_org[0] ? m->asn_org : "?");
     fputs(line, stderr);
 
     /* Every address the edge answered with, in the order the server gave them,

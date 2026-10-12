@@ -176,6 +176,13 @@ int main(int argc, char **argv) {
     int g_zoom = 1;
     int dirty = 1;
     int running = 1;
+    /* engine_finished() stays true once a run ends and is only cleared by
+     * engine_restart, so it cannot by itself mean "just finished". Without this
+     * the history file is rewritten from end to end on every single frame that
+     * follows a completed test - which measured as a pegged core and a hot disk
+     * for as long as the app stayed open. */
+    int recorded = 0;
+    int paused = 0;
     uint64_t last_tick = now_ms();
 
     while (running) {
@@ -197,6 +204,16 @@ int main(int argc, char **argv) {
             dirty = 1;
             continue;
         }
+        /* Resolved before the keymap: a click needs the screen size to know
+         * where the tab strip is, and the strip is on the last row. */
+        if (ev.type == EV_MOUSE && ev.mbtn == 0) {
+            int tab = ui_hit_tab(ev.mx, ev.my, w, h);
+            if (tab >= 0) {
+                g_view = tab;
+                dirty = 1;
+                continue;
+            }
+        }
         if (ev.type == EV_KEY || ev.type == EV_MOUSE) {
             TermKey k = keymap_from_event(ev);
             switch (keymap_action(k, ev.mx, ev.my)) {
@@ -216,16 +233,33 @@ int main(int argc, char **argv) {
                     dirty = 1;
                     break;
                 case ACT_ZOOM_RESET: g_zoom = 1; dirty = 1; break;
-                case ACT_PAUSE: engine_cancel(e); dirty = 1; break;
-                case ACT_MODE_FULL:  engine_restart(e, MODE_FULL);     dirty = 1; break;
-                case ACT_MODE_PING:  engine_restart(e, MODE_LATENCY);  dirty = 1; break;
-                case ACT_MODE_DOWN:  engine_restart(e, MODE_DOWNLOAD); dirty = 1; break;
-                case ACT_MODE_UP:    engine_restart(e, MODE_UPLOAD);   dirty = 1; break;
+                case ACT_PAUSE:
+                    /* The engine cannot suspend a phase mid-flight, so this
+                     * cancels the run and remembers that it did. Without the
+                     * flag the key is a one-way door: the transfer stops but
+                     * the engine stays in PH_DOWNLOAD reporting nothing until
+                     * its deadline, and only 'r' gets out. */
+                    if (paused) {
+                        engine_restart(e, engine_mode(e));
+                        paused = 0;
+                        recorded = 0;
+                    } else {
+                        engine_cancel(e);
+                        paused = 1;
+                    }
+                    dirty = 1;
+                    break;
+                case ACT_MODE_FULL:  engine_restart(e, MODE_FULL);     recorded = 0; paused = 0; dirty = 1; break;
+                case ACT_MODE_PING:  engine_restart(e, MODE_LATENCY);  recorded = 0; paused = 0; dirty = 1; break;
+                case ACT_MODE_DOWN:  engine_restart(e, MODE_DOWNLOAD); recorded = 0; paused = 0; dirty = 1; break;
+                case ACT_MODE_UP:    engine_restart(e, MODE_UPLOAD);   recorded = 0; paused = 0; dirty = 1; break;
                 case ACT_RERUN:
                     /* Restarting cancels the run in flight first, so a superseded
                      * test stops competing for bandwidth rather than interleaving
                      * its samples into the new one. */
                     engine_restart(e, engine_mode(e));
+                    recorded = 0;
+                    paused = 0;
                     dirty = 1;
                     break;
                 case ACT_EXPORT: cli_json(e); break;
@@ -243,7 +277,8 @@ int main(int argc, char **argv) {
         uint64_t t = now_ms();
         int live = engine_poll(e);
         if (live) dirty = 1;
-        if (engine_finished(e)) {
+        if (engine_finished(e) && !recorded) {
+            recorded = 1;
             /* Recording on finish rather than on start means a cancelled run
              * is not written as though it completed. */
             if (hist && engine_result(e)->valid && !opt.no_history) {
