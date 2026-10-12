@@ -58,5 +58,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cfspeed-${{ matrix.os }}
-          path: cfspeed
+          path: cfspeed*
           if-no-files-found: error
