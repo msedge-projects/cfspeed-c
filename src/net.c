@@ -44,6 +44,17 @@ static void sleep_ms(int ms) {
 #endif
 }
 
+/* Set CFS_DEBUG=1 to trace requests to stderr. Off by default: this is a TUI
+ * and a wall of curl messages would wreck it. */
+static int dbg(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("CFS_DEBUG");
+        on = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return on;
+}
+
 typedef struct {
     char  *buf;
     size_t len;
@@ -152,6 +163,7 @@ void net_fetch_meta(const char *base_url, Meta *m) {
     CURL *c = curl_easy_init();
     if (!c) return;
     curl_base(c, base_url);
+    if (dbg()) fprintf(stderr, "[meta] base=%s\n", base_url);
 
     /* Time DNS separately: resolution is a real part of connection setup and
      * conflating it with TLS hides which one is slow. */
@@ -272,6 +284,7 @@ void net_fetch_meta(const char *base_url, Meta *m) {
 int net_probe(const char *base_url, double *ms) {
     CURL *c = curl_easy_init();
     if (!c) return NET_ERR;
+    if (dbg()) fprintf(stderr, "[probe] start\n");
     Sink sink = {0};
     char url[512];
     snprintf(url, sizeof url, "%s/__down?bytes=0", base_url);
@@ -288,6 +301,7 @@ int net_probe(const char *base_url, double *ms) {
     free(sink.buf);
     curl_easy_cleanup(c);
 
+    if (dbg()) fprintf(stderr, "[probe] rc=%d http=%ld ms=%.1f\n", (int)rc, code, elapsed);
     if (rc != CURLE_OK) return NET_ERR;
     if (code < 200 || code >= 300) return NET_REFUSED;
     *ms = elapsed;
@@ -385,6 +399,11 @@ static void *worker_main(void *arg) {
         long code = 0;
         curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
         if (hdrs) curl_slist_free_all(hdrs);
+        if (dbg())
+            fprintf(stderr, "[worker %s] url=%s rc=%d(%s) http=%ld count=%llu chunk=%lu\n",
+                    w->upload ? "up" : "down", url, (int)rc,
+                    rc == CURLE_OK ? "ok" : curl_easy_strerror(rc), code,
+                    (unsigned long long)(w->counter ? *w->counter : 0), w->chunk);
 
         if (w->upload) {
             /* Only a 2xx means the body actually landed. */
