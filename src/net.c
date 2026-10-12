@@ -11,6 +11,7 @@
 #  include <windows.h>
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
+#  include <io.h>
 #else
 #  include <pthread.h>
 #  include <time.h>
@@ -97,7 +98,64 @@ static size_t sink_discard(char *p, size_t sz, size_t n, void *ud) {
     return total;
 }
 
+static int file_exists(const char *path) {
+#if defined(_WIN32)
+    return _access(path, 0) == 0;
+#else
+    return access(path, R_OK) == 0;
+#endif
+}
+
+/* Locate a CA bundle.
+ *
+ * Linux and macOS find the system store on their own. A Windows curl built
+ * against GnuTLS or OpenSSL has none, and without one every request fails with
+ * CURLE_PEER_FAILED_VERIFICATION. CURLSSLOPT_NATIVE_CA does not help there: it
+ * is honoured only by schannel builds. So a bundle is shipped beside the binary
+ * and pointed at explicitly.
+ *
+ * Disabling verification instead would be a security regression on a tool whose
+ * entire job is trusting a remote endpoint. */
+static void use_ca_bundle(CURL *c) {
+    char path[512];
+
+#if defined(_WIN32)
+    /* Next to the executable, which is where the release puts it. */
+    char exe[MAX_PATH];
+    DWORD n = GetModuleFileNameA(NULL, exe, (DWORD)sizeof exe);
+    if (n > 0 && n < sizeof exe) {
+        char *slash = strrchr(exe, '\\');
+        if (slash) {
+            *slash = '\0';
+            size_t l = strlen(exe);
+            snprintf(path, sizeof path, "%s%scfspeed-ca.pem", exe,
+                     l && exe[l - 1] == '\\' ? "" : "\\");
+            if (file_exists(path)) {
+                curl_easy_setopt(c, CURLOPT_CAINFO, path);
+                if (dbg()) fprintf(stderr, "[ca] using %s\n", path);
+                return;
+            }
+        }
+    }
+#else
+    static const char *candidates[] = {
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+        "/etc/ssl/cert.pem",
+    };
+    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+        if (file_exists(candidates[i])) {
+            curl_easy_setopt(c, CURLOPT_CAINFO, candidates[i]);
+            if (dbg()) fprintf(stderr, "[ca] using %s\n", candidates[i]);
+            return;
+        }
+    }
+#endif
+    if (dbg()) fprintf(stderr, "[ca] no bundle found, relying on the build default\n");
+}
+
 static void curl_base(CURL *c, const char *url) {
+    use_ca_bundle(c);
     curl_easy_setopt(c, CURLOPT_URL, url);
     curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(c, CURLOPT_MAXREDIRS, 5L);
