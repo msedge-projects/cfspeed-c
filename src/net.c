@@ -106,12 +106,20 @@ static void curl_base(CURL *c, const char *url) {
     curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(c, CURLOPT_USERAGENT, "cfspeed/1.0");
     curl_easy_setopt(c, CURLOPT_ACCEPT_ENCODING, "");
-#if defined(_WIN32) && defined(CURLSSLOPT_NATIVE_CA)
-    /* On Windows curl has no CA bundle of its own and without this every
-     * request fails certificate verification. Linux and macOS find the system
-     * store on their own. Turning verification off instead would be a security
-     * regression on a tool whose whole job is trusting a remote endpoint. */
-    curl_easy_setopt(c, CURLOPT_SSL_OPTIONS, (long)CURLSSLOPT_NATIVE_CA);
+#if defined(_WIN32)
+    /* CURLSSLOPT_NATIVE_CA is an enum member, not a macro, so it cannot be
+     * tested with #if defined() - doing so silently compiles the branch out and
+     * every request then fails with CURLE_PEER_FAILED_VERIFICATION, because
+     * Windows curl has no CA bundle of its own. Linux and macOS locate the
+     * system store without help.
+     *
+     * Turning verification off instead would be a security regression on a tool
+     * whose entire job is trusting a remote endpoint. */
+    {
+        curl_version_info_data *vi = curl_version_info(CURLVERSION_NOW);
+        if (vi && vi->version_num >= 0x074700) /* 7.71.0 introduced it */
+            curl_easy_setopt(c, CURLOPT_SSL_OPTIONS, (long)CURLSSLOPT_NATIVE_CA);
+    }
 #endif
 }
 
