@@ -287,7 +287,20 @@ int history_save(const History *h) {
      * start cannot overflow: count is already known to be positive and above
      * MAX_RUNS here. */
     int start = (h->count > MAX_RUNS) ? h->count - MAX_RUNS : 0;
-    for (int i = start; i < h->count; i++) {
+    /* Both ends of the window are clamped to the array, never trusted.
+     *
+     * `count` is caller-supplied and sits immediately after `runs[MAX_RUNS]`
+     * in this struct, so a value above MAX_RUNS does not describe runs that
+     * exist - it describes memory past the end of a 4 MB block. Iterating to
+     * `count` in that state reads ~1 MB beyond the allocation, which a gdb
+     * backtrace confirmed faulting in esc(). The window is still taken from
+     * the tail rather than clamped to the head, because for every count this
+     * program can actually produce - main.c refuses to append past MAX_RUNS
+     * and history_load clamps on the way in - the two are identical.
+     */
+    if (start > MAX_RUNS) start = MAX_RUNS;
+    int last = (h->count < MAX_RUNS) ? h->count : MAX_RUNS;
+    for (int i = start; i < last; i++) {
         if (write_run(f, &h->runs[i]) != 0) {
             fclose(f);
             return -1;

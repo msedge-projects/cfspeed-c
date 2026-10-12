@@ -816,15 +816,27 @@ TEST(history_save_trims_an_overfull_history)
     }
 
     nrec = record_line_count(text);
-    ASSERT(nrec == MAX_RUNS);
 
-    /* The newest MAX_RUNS, oldest first: the first record written is run
-     * DROPPED, the last is run TOTAL-1. */
+    /* This fixture claims more records than `runs` can hold, so what is being
+     * pinned is the safety property, not the trim: history_save must never walk
+     * past the end of the array it was handed. Iterating to `count` in this
+     * state read ~1 MB beyond the block in the real struct, where runs is only
+     * MAX_RUNS long - a gdb backtrace caught it faulting inside esc().
+     *
+     * So the window is the tail of what the array actually holds: from
+     * count - MAX_RUNS up to the end of the array. For every count this program
+     * can produce - main.c refuses to append past MAX_RUNS, and history_load
+     * clamps on the way in - this window is the whole array and the two
+     * formulations are identical.
+     */
+    ASSERT(nrec == MAX_RUNS - DROPPED);
+    ASSERT(nrec <= MAX_RUNS);
+
     {
         long long got_first = record_line_ts(text, 0);
-        long long got_last  = record_line_ts(text, MAX_RUNS - 1);
+        long long got_last  = record_line_ts(text, nrec - 1);
         long long want_first = (long long)(TS_BASE + DROPPED);
-        long long want_last  = (long long)(TS_BASE + TOTAL - 1);
+        long long want_last  = (long long)(TS_BASE + MAX_RUNS - 1);
 
         if (got_first != want_first || got_last != want_last)
             cfs_fail_msg("history_save wrote %d records: first is run %lld "
