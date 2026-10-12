@@ -37,7 +37,7 @@ $(BIN): $(OBJ)
 TESTSRC := tests/test_units.c src/test.c src/stats.c src/chart.c src/fmt.c src/actions.c
 
 test: $(TESTSRC)
-	$(CC) $(CFLAGS) -o test_units $^ $(LDFLAGS) -lm
+	$(CC) $(CFLAGS) -Isrc -o test_units $^ $(LDFLAGS) -lm
 	./test_units
 
 clean:

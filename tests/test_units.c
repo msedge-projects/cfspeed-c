@@ -15,12 +15,16 @@
  *   cc -std=gnu11 -O2 -Wall -Wextra -o t tests/test_units.c \
  *      src/test.c src/stats.c src/chart.c src/fmt.c src/actions.c -lm
  */
-#include "test.h"
+/* Includes are relative to this file rather than bare. A quoted include is
+ * resolved against the directory of the including file before any -I path is
+ * consulted, so the suite builds both from "make test" (which passes no -Isrc)
+ * and from a direct command line that does. */
+#include "../src/test.h"
 
-#include "actions.h"
-#include "chart.h"
-#include "fmt.h"
-#include "stats.h"
+#include "../src/actions.h"
+#include "../src/chart.h"
+#include "../src/fmt.h"
+#include "../src/stats.h"
 
 #include <float.h>
 #include <math.h>
