@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: linux-x86_64
+          - os: macos-latest
+            asset: macos-aarch64
+          - os: windows-latest
+            asset: windows-x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libcurl4-openssl-dev
+
+      - name: Set up MSYS2
+        if: matrix.os == 'windows-latest'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-curl
+            make
+
+      - name: Build (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: make && strip cfspeed || true
+
+      - name: Build (macOS)
+        if: matrix.os == 'macos-latest'
+        run: make CC=clang && strip cfspeed || true
+
+      - name: Build (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: msys2 {0}
+        run: |
+          export PATH="/mingw64/bin:$PATH"
+          make
+          strip cfspeed || true
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            mv cfspeed.exe dist/
+            (cd dist && zip cfspeed-${{ matrix.asset }}.zip cfspeed.exe)
+          else
+            cp cfspeed dist/cfspeed-${{ matrix.asset }}
+            tar -czf dist/cfspeed-${{ matrix.asset }}.tar.gz -C dist cfspeed-${{ matrix.asset }}
+          fi
+          (cd dist && sha256sum cfspeed-*.* > checksums.txt) || \
+            (cd dist && shasum -a 256 cfspeed-*.* > checksums.txt)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.asset }}
+          path: dist/
+          if-no-files-found: error
+
+  # One publisher, not one per matrix leg: parallel jobs racing to create the
+  # same release is how you get half-published releases.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: staged
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            staged/**/checksums.txt
+            staged/**/cfspeed-*.zip
+            staged/**/cfspeed-*.tar.gz
+          generate_release_notes: true

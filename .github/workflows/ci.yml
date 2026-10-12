@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libcurl4-openssl-dev
+
+      - name: Install dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install curl || true
+
+      # MSYS2 gives the Windows build the same gcc as the other two targets,
+      # and pacman supplies curl, so the port does not need a second toolchain.
+      - name: Set up MSYS2
+        if: matrix.os == 'windows-latest'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-curl
+            make
+
+      - name: Build (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: make
+
+      - name: Build (macOS)
+        if: matrix.os == 'macos-latest'
+        run: make CC=clang
+
+      - name: Build (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: msys2 {0}
+        run: |
+          export PATH="/mingw64/bin:$PATH"
+          make
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: cfspeed-${{ matrix.os }}
+          path: cfspeed
+          if-no-files-found: error
