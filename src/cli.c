@@ -35,11 +35,6 @@
  * as failed and a minimal valid object is emitted instead. */
 #define JSON_CAP 16384
 
-/* Longest string we serialise is the engine's 256-byte error message; a
- * \uXXXX escape is the worst a byte can become, so six per character plus the
- * terminator covers it with room to spare. */
-#define SCRATCH_CAP 1600
-
 /* ------------------------------------------------------------- usage text */
 
 static void cli_usage(void) {
@@ -226,7 +221,6 @@ typedef struct {
     size_t len;
     int    cut;    /* set once the document can no longer be completed */
     char   num[48];
-    char   str[SCRATCH_CAP];
 } Buf;
 
 static void bput(Buf *b, const char *fmt, ...) {

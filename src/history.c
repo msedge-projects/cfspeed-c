@@ -439,10 +439,10 @@ static int read_num(const char *obj, const char *end, const char *key, double *o
     return 1;
 }
 
-static int read_str(const char *obj, const char *end, const char *key,
-                    char *dst, size_t cap) {
-    const char *v = member(obj, end, key);
-    if (!v || cap == 0) return 0;
+/* Copies the quoted string whose opening quote is at v. Shared with the array
+ * reader below, so an element and a member decode by the same rules. */
+static int read_str_at(const char *v, const char *end, char *dst, size_t cap) {
+    if (cap == 0) return 0;
     dst[0] = '\0';
     if (v >= end || *v != '"') return 0;
 
@@ -456,9 +456,75 @@ static int read_str(const char *obj, const char *end, const char *key,
     return 1;
 }
 
+static int read_str(const char *obj, const char *end, const char *key,
+                    char *dst, size_t cap) {
+    const char *v = member(obj, end, key);
+    if (!v) return 0;
+    return read_str_at(v, end, dst, cap);
+}
+
+/* A JSON array of strings. Only as many elements as the destination can hold
+ * are taken and counted, which is the same clamp the writer applies, so a
+ * hand-edited file with a hundred entries cannot run past the array. */
+static int read_str_array(const char *obj, const char *end, const char *key,
+                          char *base, size_t stride, int max, int *count) {
+    const char *v = member(obj, end, key);
+    if (!v || *v != '[') return 0;
+    *count = 0;
+
+    for (v++; v < end && *v != ']' && *count < max;) {
+        while (v < end && (is_ws(*v) || *v == ',')) v++;
+        if (v >= end || *v == ']') break;
+        if (*v != '"') {
+            const char *nx = skip_value(v, end); /* a number or nested value */
+            v = nx > v ? nx : v + 1;             /* malformed must not spin */
+            continue;
+        }
+        read_str_at(v, end, base + (size_t)(*count) * stride, stride);
+        (*count)++;
+        v = str_end(v, end);
+    }
+    return 1;
+}
+
+/* A JSON boolean. 0/1 and a quoted spelling are accepted too, because the
+ * cost of believing them is a lost run record and the cost of refusing them is
+ * a file that silently stops loading. *out is untouched unless one is found. */
+static int read_bool(const char *obj, const char *end, const char *key, int *out) {
+    const char *v = member(obj, end, key);
+    if (!v) return 0;
+
+    char tmp[16];
+    size_t i = 0;
+    if (v < end && *v == '"') v++;
+    while (v < end && i + 1 < sizeof tmp && !is_delim(*v) && !is_ws(*v)) {
+        char c = *v++;
+        tmp[i++] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+    }
+    tmp[i] = '\0';
+
+    if (strcmp(tmp, "true") == 0 || strcmp(tmp, "1") == 0)  { *out = 1; return 1; }
+    if (strcmp(tmp, "false") == 0 || strcmp(tmp, "0") == 0) { *out = 0; return 1; }
+    return 0;
+}
+
+/* A count that goes on to index an array. Returns -1 when absent, so a caller
+ * can tell "not written" from "written as zero"; clamps to hi either way,
+ * since the value comes out of a file and nothing else bounds it. */
+static int read_count(const char *obj, const char *end, const char *key, int hi) {
+    double d;
+    if (!read_num(obj, end, key, &d)) return -1;
+    if (!(d > 0.0)) return 0;
+    return (d < (double)hi) ? (int)d : hi;
+}
+
 static void read_tput(const char *obj, const char *end, Throughput *t) {
     double d;
     if (read_num(obj, end, "bytes", &d)) t->bytes = (uint64_t)(d > 0.0 ? d : 0.0);
+    /* views gates the whole DETAILS section on this, so dropping it here is
+     * what makes a historical run render as an empty column. */
+    int n = read_count(obj, end, "nsamples", MAX_SAMPLES);
+    if (n >= 0) t->nsamples = n;
     if (read_num(obj, end, "avg",  &d)) t->avg = d;
     if (read_num(obj, end, "p95",  &d)) t->p95 = d;
     if (read_num(obj, end, "max",  &d)) t->max = d;
@@ -466,51 +532,119 @@ static void read_tput(const char *obj, const char *end, Throughput *t) {
 
 static void read_lat(const char *obj, const char *end, LatStats *l) {
     double d;
-    if (read_num(obj, end, "med",    &d)) l->med = d;
+    if (read_num(obj, end, "avg",    &d)) l->avg = d;
     if (read_num(obj, end, "min",    &d)) l->min = d;
+    if (read_num(obj, end, "med",    &d)) l->med = d;
+    if (read_num(obj, end, "p25",    &d)) l->p25 = d;
+    if (read_num(obj, end, "p75",    &d)) l->p75 = d;
+    if (read_num(obj, end, "p95",    &d)) l->p95 = d;
+    if (read_num(obj, end, "p99",    &d)) l->p99 = d;
+    if (read_num(obj, end, "max",    &d)) l->max = d;
     if (read_num(obj, end, "jitter", &d)) l->jitter = d;
     if (read_num(obj, end, "loss",   &d)) l->loss = d;
+    /* views gates the HISTORY tab's LOSS column on samples being non-zero,
+     * so a record without it prints '-' for every run in the file. */
+    int n = read_count(obj, end, "samples", MAX_PROBES);
+    if (n >= 0) l->samples = n;
 }
 
 /* Returns 0 for an object holding none of our keys, which is how a version
- * header or a future record type is stepped over instead of aborting the load. */
+ * header or a future record type is stepped over instead of aborting the load.
+ *
+ * Two eras of file are accepted. The canonical shape is the one cli.c writes:
+ * a "meta" context object, "download"/"upload" summaries, a "latency" object
+ * holding an "idle" and a "loaded" window, and a "grades" object. The first
+ * history format kept all of that flat under different names. The key names
+ * *inside* those containers were already identical in both, so the container
+ * is chosen once here and every read below is shared: a file from either
+ * writer builds the same record, and a file that mixes the two loads field by
+ * field rather than one or the other. */
 static int parse_run(const char *obj, const char *end, RunResult *r) {
     double d;
     int found = 0;
+    const char *s, *e;
+
     memset(r, 0, sizeof *r);
 
-    const char *s, *e;
+    const char *mob = obj, *moe = end;  /* meta, or the record itself */
+    const char *lob = obj, *loe = end;  /* latency, or the record itself */
+    const char *gob = obj, *goe = end;  /* grades, or the record itself */
+    if (member_span(obj, end, "meta", &s, &e))    { mob = s; moe = e; found++; }
+    if (member_span(obj, end, "latency", &s, &e)) { lob = s; loe = e; found++; }
+    if (member_span(obj, end, "grades", &s, &e))  { gob = s; goe = e; found++; }
 
     if (read_num(obj, end, "timestamp_ms", &d)) {
         r->timestamp_ms = (uint64_t)(d > 0.0 ? d : 0.0);
         found++;
     }
-    if (read_num(obj, end, "dns_ms", &d)) { r->meta.dns_ms = d; found++; }
-    if (read_num(obj, end, "tls_ms", &d)) { r->meta.tls_ms = d; found++; }
-    found += read_str(obj, end, "colo", r->meta.colo, sizeof r->meta.colo);
-    found += read_str(obj, end, "ip", r->meta.ip, sizeof r->meta.ip);
-    found += read_str(obj, end, "asn", r->meta.asn, sizeof r->meta.asn);
-    found += read_str(obj, end, "asn_org", r->meta.asn_org, sizeof r->meta.asn_org);
-    found += read_str(obj, end, "loc", r->meta.loc, sizeof r->meta.loc);
-    found += read_str(obj, end, "tls", r->meta.tls, sizeof r->meta.tls);
-    found += read_str(obj, end, "warp", r->meta.warp, sizeof r->meta.warp);
-    found += read_str(obj, end, "http", r->meta.http, sizeof r->meta.http);
-    found += read_str(obj, end, "stab_grade", r->stab_grade, sizeof r->stab_grade);
-    found += read_str(obj, end, "bloat_grade", r->bloat_grade, sizeof r->bloat_grade);
-    if (read_num(obj, end, "bufferbloat_ms", &d)) { r->bufferbloat_ms = d; found++; }
-    if (read_num(obj, end, "stability_cv", &d))   { r->stability_cv = d; found++; }
+    if (read_num(mob, moe, "dns_ms", &d)) { r->meta.dns_ms = d; found++; }
+    if (read_num(mob, moe, "tls_ms", &d)) { r->meta.tls_ms = d; found++; }
+    found += read_str(mob, moe, "colo", r->meta.colo, sizeof r->meta.colo);
+    found += read_str(mob, moe, "ip", r->meta.ip, sizeof r->meta.ip);
+    found += read_str(mob, moe, "asn", r->meta.asn, sizeof r->meta.asn);
+    found += read_str(mob, moe, "asn_org", r->meta.asn_org, sizeof r->meta.asn_org);
+    found += read_str(mob, moe, "loc", r->meta.loc, sizeof r->meta.loc);
+    found += read_str(mob, moe, "tls", r->meta.tls, sizeof r->meta.tls);
+    found += read_str(mob, moe, "tls_cipher", r->meta.tls_cipher, sizeof r->meta.tls_cipher);
+    found += read_str(mob, moe, "http", r->meta.http, sizeof r->meta.http);
+    found += read_str(mob, moe, "warp", r->meta.warp, sizeof r->meta.warp);
 
-    if (member_span(obj, end, "down", &s, &e)) { found++; read_tput(s, e, &r->down); }
-    if (member_span(obj, end, "up", &s, &e))   { found++; read_tput(s, e, &r->up); }
-    if (member_span(obj, end, "idle", &s, &e)) { found++; read_lat(s, e, &r->idle); }
-    if (member_span(obj, end, "loaded_down", &s, &e)) {
+    /* The array bounds the count: a hand-written number larger than it would
+     * index past the end, and a writer that kept only the number still loads. */
+    int nedge = EDGE_SLOTS;
+    int have_ips = read_str_array(mob, moe, "edge_ips", r->meta.edge_ips[0],
+                                  EDGE_WIDTH, EDGE_SLOTS, &nedge);
+    int cedge = read_count(mob, moe, "edge_ip_count", EDGE_SLOTS);
+    if (have_ips || cedge >= 0) {
+        found++;
+        if (cedge < 0 || cedge > nedge) cedge = nedge;
+        r->meta.edge_ip_count = cedge;
+    }
+
+    if (member_span(obj, end, "download", &s, &e)) { found++; read_tput(s, e, &r->down); }
+    else if (member_span(obj, end, "down", &s, &e)) { found++; read_tput(s, e, &r->down); }
+    if (member_span(obj, end, "upload", &s, &e)) { found++; read_tput(s, e, &r->up); }
+    else if (member_span(obj, end, "up", &s, &e)) { found++; read_tput(s, e, &r->up); }
+
+    if (member_span(lob, loe, "idle", &s, &e)) { found++; read_lat(s, e, &r->idle); }
+    if (member_span(lob, loe, "loaded", &s, &e)) { found++; read_lat(s, e, &r->loaded_down); }
+    else if (member_span(lob, loe, "loaded_down", &s, &e)) {
         found++;
         read_lat(s, e, &r->loaded_down);
     }
 
+    if (read_num(obj, end, "bufferbloat_ms", &d)) { r->bufferbloat_ms = d; found++; }
+    if (read_num(obj, end, "stability_cv", &d))   { r->stability_cv = d; found++; }
+
+    if (!read_str(gob, goe, "stability", r->stab_grade, sizeof r->stab_grade))
+        found += read_str(gob, goe, "stab_grade", r->stab_grade, sizeof r->stab_grade);
+    else
+        found++;
+    if (!read_str(gob, goe, "bufferbloat", r->bloat_grade, sizeof r->bloat_grade))
+        found += read_str(gob, goe, "bloat_grade", r->bloat_grade, sizeof r->bloat_grade);
+    else
+        found++;
+
     if (found == 0) return 0;
-    r->valid = 1; /* anything stored here is a run that reached the end */
+
+    /* A record that states its verdict is believed: a refused run writes
+     * valid:false and would otherwise come back looking successful. A record
+     * that does not state one predates the field, and everything it stored was
+     * a run that reached the end, so absent means valid. */
+    if (!read_bool(obj, end, "valid", &r->valid)) r->valid = 1;
     return 1;
+}
+
+/* The first '{' at or after p that is not inside a JSON string. Braces are
+ * legal inside a string - an ASN org name or a location is free text the
+ * server chose - so a raw scan for '{' lets one brace inside a quoted field
+ * re-cut every record boundary after it. */
+static const char *next_record(const char *p, const char *end) {
+    for (; p < end; p++) {
+        if (*p == '"') { p = str_end(p, end) - 1; continue; }
+        if (*p == '{') return p;
+    }
+    return NULL;
 }
 
 /* ------------------------------------------------------------------ load */
@@ -541,24 +675,27 @@ void history_load(History *h) {
 
     /* Two passes: count the records, then parse only the newest MAX_RUNS.
      * Shifting the array on overflow instead would memcpy megabytes per extra
-     * run, and a hand-edited file could carry thousands of them. */
+     * run, and a hand-edited file could carry thousands of them. Both passes
+     * walk records the same way, so what is counted and what is kept agree. */
     int total = 0;
     const char *keep = NULL;
     for (const char *q = buf; q < end;) {
-        if (*q != '{') { q++; continue; }
-        const char *oe = skip_container(q, end);
-        if (oe <= q) { q++; continue; }
-        if (total >= MAX_RUNS && !keep) keep = q;
+        const char *start = next_record(q, end);
+        if (!start) break;
+        const char *oe = skip_container(start, end);
+        if (oe <= start) break;
+        if (total >= MAX_RUNS && !keep) keep = start;
         total++;
         q = oe;
     }
 
     for (const char *p = keep ? keep : buf; p < end && h->count < MAX_RUNS;) {
-        if (*p != '{') { p++; continue; }
-        const char *oe = skip_container(p, end);
-        if (oe <= p) { p++; continue; }
+        const char *start = next_record(p, end);
+        if (!start) break;
+        const char *oe = skip_container(start, end);
+        if (oe <= start) break;
         RunResult r;
-        if (parse_run(p, oe, &r)) h->runs[h->count++] = r;
+        if (parse_run(start, oe, &r)) h->runs[h->count++] = r;
         p = oe;
     }
 

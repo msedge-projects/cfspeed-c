@@ -46,40 +46,77 @@ jobs:
         if: matrix.os == 'macos-latest'
         run: make CC=clang && strip cfspeed || true
 
-      - name: Build (Windows)
+      # Windows libcurl is GnuTLS-backed, and GnuTLS reads its trust list from
+      # a file. Windows keeps its trust store in a registry database only
+      # schannel can use, so without this file every request fails certificate
+      # verification and the app measures nothing at all.
+      - name: Fetch CA bundle
+        if: matrix.os == 'windows-latest'
+        shell: msys2 {0}
+        run: bash scripts/fetch-ca.sh cfspeed-ca.pem
+
+      # ldd reports only DIRECT imports, so one pass collects libcurl and
+      # nothing beneath it. The tree has to be walked to a fixed point or the
+      # shipped package dies on the user's machine with a missing DLL.
+      - name: Collect Windows runtime dependencies
         if: matrix.os == 'windows-latest'
         shell: msys2 {0}
         run: |
           export PATH="/mingw64/bin:$PATH"
-          make
-          strip cfspeed.exe || true
-          # Ship the runtime deps: the exe is not standalone without them.
-          for dll in $(ldd cfspeed.exe | grep -o '[A-Za-z0-9_-]*\.dll'); do
-            src=$(ldd cfspeed.exe | grep -o "[^ ]*$dll" | head -1)
-            [ -f "$src" ] && cp "$src" .
+          mkdir -p stage
+          cp cfspeed.exe stage/
+
+          queue=(cfspeed.exe)
+          seen="|"
+          while [ ${#queue[@]} -gt 0 ]; do
+            cur="${queue[0]}"
+            queue=("${queue[@]:1}")
+            ldd "$cur" 2>/dev/null | while read -r line; do
+              case "$line" in
+                *"=>"*)
+                  # Take the path, not the name: the name appears on both
+                  # sides of "=>" and grep -o returns the leftmost.
+                  dep="${line##*=> }"
+                  case "$dep" in
+                    /c/Windows/*|'') continue ;;
+                  esac
+                  [ -f "$dep" ] || continue
+                  dname="$(basename "$dep")"
+                  case "$seen" in *"|$dname|"*) continue ;; esac
+                  seen="$seen$dname|"
+                  cp -n "$dep" stage/ 2>/dev/null || true
+                  queue+=("$dep")
+                  ;;
+              esac
+            done
           done
+
+          cp cfspeed-ca.pem stage/
+
+          # Fail loudly here rather than shipping a package that cannot start.
+          n=$(ls stage/*.dll 2>/dev/null | wc -l)
+          echo "collected $n runtime DLLs"
+          if [ ! -f stage/libcurl-4.dll ]; then
+            echo "::error::libcurl-4.dll missing from the package"
+            exit 1
+          fi
+          if [ "$n" -lt 10 ]; then
+            echo "::error::only $n DLLs collected; the dependency walk is probably shallow again"
+            exit 1
+          fi
 
       - name: Package
         shell: bash
         run: |
           mkdir -p dist
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            # The binary links libcurl dynamically, so it is not standalone
-            # without its runtime dependencies beside it.
-            mkdir -p win
-            mv cfspeed.exe win/
-            for dll in $(ldd cfspeed.exe | grep -o '[A-Za-z0-9_-]*\.dll'); do
-              src=$(ldd cfspeed.exe | grep -o "[^ ]*$dll" | head -1)
-              [ -f "$src" ] && cp "$src" win/
-            done
-            cp win/*.dll dist/ 2>/dev/null || true
-            (cd dist && zip cfspeed-${{ matrix.asset }}.zip cfspeed.exe *.dll)
+            cp stage/* dist/
+            (cd dist && zip -q cfspeed-${{ matrix.asset }}.zip *)
+            test -f dist/cfspeed-${{ matrix.asset }}.zip
           else
             cp cfspeed dist/cfspeed-${{ matrix.asset }}
             tar -czf dist/cfspeed-${{ matrix.asset }}.tar.gz -C dist cfspeed-${{ matrix.asset }}
           fi
-          (cd dist && sha256sum cfspeed-*.* > checksums.txt) || \
-            (cd dist && shasum -a 256 cfspeed-*.* > checksums.txt)
 
       - uses: actions/upload-artifact@v4
         with:
@@ -98,11 +135,24 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: staged
+
+      # Computed once, here, over every asset. Writing checksums.txt in each
+      # matrix leg produced three files with the same name that then collided
+      # at upload time.
+      - name: Checksum every asset
+        run: |
+          set -euo pipefail
+          cd staged
+          find . -type f \( -name '*.zip' -o -name '*.tar.gz' \) -print0 \
+            | sort -z \
+            | xargs -0 sha256sum > "$GITHUB_WORKSPACE/checksums.txt"
+          cat "$GITHUB_WORKSPACE/checksums.txt"
+
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            staged/**/checksums.txt
-            staged/**/cfspeed-*.zip
-            staged/**/cfspeed-*.tar.gz
+            checksums.txt
+            staged/**/*.zip
+            staged/**/*.tar.gz
           generate_release_notes: true

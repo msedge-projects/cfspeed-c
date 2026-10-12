@@ -97,7 +97,7 @@ The path must be at least one character and shorter than 512 characters
 including the terminator. A path cut short by the buffer is refused, because
 writing a result to a name the user never chose is worse than not writing one.
 .TP
-.B \-\-no\-history
+.B \-\-no-history
 Do not persist this run to the on\-disk history file.
 .TP
 .B \-\-version
@@ -182,7 +182,7 @@ on Windows, falling back to
 .IR %USERPROFILE% .
 If neither environment variable is set the path is relative, so history is
 written beside the binary rather than failing every save.
-.B \-\-no\-history
+.B \-\-no-history
 suppresses writing to this file for one run.
 .SH EXAMPLES
 Measure everything and watch it in the interface:
@@ -241,7 +241,7 @@ Run a test without touching the history file:
 .PP
 .RS
 .EX
-cfspeed \-\-no\-history
+cfspeed \-\-no-history
 .EE
 .RE
 .SH SEE ALSO
