@@ -56,17 +56,14 @@ jobs:
           test -f cfspeed.exe
 
       # Windows libcurl is GnuTLS-backed, and GnuTLS reads its trust list from
-      # a file. Windows keeps its trust store in a registry database only
-      # schannel can use, so without this file every request fails certificate
+      # a file. Windows keeps its trust store in a registry database that only
+      # schannel can read, so without this file every request fails certificate
       # verification and the app measures nothing at all.
       - name: Fetch CA bundle
         if: matrix.os == 'windows-latest'
         shell: msys2 {0}
         run: bash scripts/fetch-ca.sh cfspeed-ca.pem
 
-      # ldd reports only DIRECT imports, so one pass collects libcurl and
-      # nothing beneath it. The tree has to be walked to a fixed point or the
-      # shipped package dies on the user's machine with a missing DLL.
       - name: Collect Windows runtime dependencies
         if: matrix.os == 'windows-latest'
         shell: msys2 {0}
@@ -75,35 +72,29 @@ jobs:
           mkdir -p stage
           cp cfspeed.exe stage/
 
-          # A space-separated string, not an array: it survives the MSYS2
-          # wrapper intact. The loop body reads from a FILE, never a pipe -
-          # `ldd | while read` runs in a subshell where every update to the
-          # queue and the seen-set is discarded on exit, so the walk silently
-          # collects exactly one level and stops.
-          queue="cfspeed.exe"
-          seen=" "
-          while [ -n "$queue" ]; do
-            cur="${queue%% *}"
-            if [ "$cur" = "$queue" ]; then queue=""; else queue="${queue#* }"; fi
-            ldd "$cur" > ldd.out 2>/dev/null || true
-            while IFS= read -r line; do
-              case "$line" in
-                *"=> "*)
-                  # Take the path, not the name: the name appears on both sides
-                  # of "=>" and grep -o returns the leftmost match.
-                  dep="${line##*=> }"
-                  case "$dep" in
-                    /c/Windows/*|'') continue ;;
-                  esac
-                  [ -f "$dep" ] || continue
-                  d="$(basename "$dep")"
-                  case "$seen" in *" $d "*) continue ;; esac
-                  seen="$seen$d "
-                  cp -f "$dep" stage/ 2>/dev/null || true
-                  queue="$queue $dep"
-                  ;;
-              esac
-            done < ldd.out
+          # ldd reports only DIRECT imports, so one pass finds libcurl and
+          # nothing beneath it. The tree must be walked to a fixed point.
+          #
+          # Each round rescans everything collected so far and copies what it
+          # finds, so no state is carried between rounds. An earlier version used
+          # `ldd | while read` and queued its finds in a shell variable: that loop
+          # body runs in a subshell, every update died with it, and the walk
+          # silently collected exactly one level. A bounded number of independent
+          # rounds cannot fail that way.
+          for round in 1 2 3 4 5 6; do
+            : > found.txt
+            for f in stage/*.dll stage/*.exe; do
+              [ -f "$f" ] || continue
+              # Only /mingw64 paths are shipped. Anything under /c/Windows is a
+              # system DLL that is already on the user's machine.
+              ldd "$f" 2>/dev/null \
+                | sed -n 's|.*=> */mingw64/\([^ ]*\.dll\).*|\1|p' \
+                | sed 's|^|/mingw64/|' >> found.txt
+            done
+            [ -s found.txt ] || break
+            while read -r dep; do
+              cp -f "/mingw64/$dep" stage/ 2>/dev/null || true
+            done < found.txt
           done
 
           if [ ! -f cfspeed-ca.pem ]; then
@@ -157,8 +148,7 @@ jobs:
           path: staged
 
       # Computed once, here, over every asset. Writing checksums.txt in each
-      # matrix leg produced three files with the same name that then collided
-      # at upload time.
+      # matrix leg produced three files of the same name that collided at upload.
       - name: Checksum every asset
         run: |
           set -euo pipefail
