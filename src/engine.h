@@ -41,6 +41,11 @@ typedef struct Engine Engine;
 Engine *engine_new(const char *base_url, Mode mode);
 void    engine_free(Engine *e);
 
+/* Override the transfer phase durations, in seconds. 0 restores the built-in
+   defaults. Clamped to a sane range internally so a hostile value cannot make
+   the engine spin or hang. */
+void engine_set_duration(Engine *e, int seconds);
+
 /* Advance the machine. Call once per frame. Returns 1 while a run is live. */
 int  engine_poll(Engine *e);
 /* True on the frame the run finishes. */

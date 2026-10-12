@@ -131,6 +131,25 @@ if avg <= 0:
         "trust-store failure looks like from here" % (avg,)
     )
 
+# avg is not proof of a transfer on its own. It is bytes divided by elapsed
+# time, so a phase that opened a socket, stalled, and still recorded a sample
+# can divide out to a positive rate while nothing was ever received. bytes is
+# the one field that only moves when payload actually lands, so a zero there
+# means the headline number was not earned by a download.
+if "bytes" not in download:
+    die("the \"download\" object has no \"bytes\" field")
+
+nbytes = download["bytes"]
+if isinstance(nbytes, bool) or not isinstance(nbytes, (int, float)):
+    die("download.bytes is not a number: %r" % (nbytes,))
+
+if nbytes <= 0:
+    die(
+        "download.bytes is %r - a rate was reported but no payload was ever "
+        "transferred, so download.avg=%r did not come from a real download"
+        % (nbytes, avg)
+    )
+
 # colo lives under meta in src/cli.c's emit_meta; the top-level fallback keeps
 # this gate honest if the schema ever flattens.
 meta = doc.get("meta")
@@ -145,6 +164,7 @@ if doc.get("error"):
     sys.stderr.write("smoke: note: the document carries an error field: %r\n" % (doc["error"],))
 
 sys.stdout.write(
-    "smoke: ok - valid JSON object, download.avg=%.2f B/s, colo=%s\n" % (avg, colo)
+    "smoke: ok - valid JSON object, download.avg=%.2f B/s, "
+    "download.bytes=%d, colo=%s\n" % (avg, nbytes, colo)
 )
 PY

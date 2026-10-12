@@ -1,255 +1,181 @@
 ﻿# cfspeed (C)
 
-A terminal speed test against Cloudflare's public endpoints
-(`https://speed.cloudflare.com`), written in C. This is a rewrite of the Rust
-project at [`msedge-projects/cfspeed`](https://github.com/msedge-projects/cfspeed);
-**it is not feature-complete and does not yet reach parity with the Rust
-version.** See [Status](#status) before you rely on it.
+A terminal speed test for Cloudflare's public speed endpoints, written in C.
+
+Measures latency, download and upload; reports jitter, packet loss,
+bufferbloat and a stability grade; renders five clickable tabs; and can emit a
+single JSON object for scripting.
+
+This is a C rewrite of [`msedge-projects/cfspeed`](https://github.com/msedge-projects/cfspeed),
+which remains the more mature implementation. See [Status](#status).
 
 ## Status
 
-This is a work in progress. What is true today:
+**It works.** The released binary has been downloaded, checksum-verified,
+extracted into an empty directory with no toolchain on `PATH`, and run.
 
-**Works**
-
-- The **LIVE** view: header, route strip (your IP, ASN, Cloudflare colo, the
-  edge IPv4/IPv6 addresses it resolved), paired download/upload bar charts, and
-  the summary tiles (idle latency, loaded latency, jitter, loss, min, bufferbloat
-  grade, stability grade, DNS, TLS).
-- All four test modes: full, latency-only, download-only, upload-only
-  (`MODE_FULL` / `MODE_LATENCY` / `MODE_DOWNLOAD` / `MODE_UPLOAD`).
-- Restart, mode switching, tab navigation, quit.
-- Terminal resize handling, plus a size fallback so it does not collapse to one
-  cell when there is no console (a pipe, a file, a CI log).
-- Differential rendering — only cells that actually changed are written, so an
-  idle screen costs nothing.
-
-**Does not work yet**
-
-- **The CHARTS / DETAILS / HISTORY / HELP tabs are not implemented.** The tab
-  bar renders and you can select a tab, but `ui_draw()` in `src/ui.c` ignores
-  its `tab` argument except to move the highlight. All five tabs currently
-  render the same LIVE content. `src/views.c` and `src/history.c` implement
-  these views but are not wired in.
-- **Only three command-line flags are actually parsed** — `--ping`/`-p`,
-  `--download`/`-d`, `--upload`/`-u`. They are matched inline in `src/main.c`.
-- **`--json`, `--quiet`, `--iterations`, `--duration`, `--out`,
-  `--no-history`, `--version` and `--help` do nothing.** `src/cli.c` implements
-  all of them, but `main.c` never calls `cli_parse()`. There is no headless or
-  JSON mode, so this is **not yet usable in CI or a pipeline**.
-- `src/cli.c`, `src/views.c` and `src/history.c` are not in the `Makefile`'s
-  `SRC` list, so they are not compiled at all.
-- The footer hint line advertises `space` (pause), `+`/`-` (zoom) and `m`
-  (actions). None of those are handled yet. `Tab`, `1`-`5` and `Esc` work but
-  are not listed there.
-
-Keys are currently handled by a `switch` in `src/main.c`. A richer keymap layer
-(`src/keymap.h`, plus `actions.h`, `fmt.h` and a small test harness in
-`test.h`) has landed alongside the other unwired modules, but nothing includes
-it yet, so the table below is the one that actually works.
-
-## Installing from a GitHub Actions artifact
-
-Builds happen in CI. There is no supported local build path, and nothing is
-published to a package manager.
-
-**Release artifacts** (built on a `v*` tag, fully packaged):
-
-| Platform | Artifact name |
-|---|---|
-| Linux x86_64 | `release-linux-x86_64` |
-| macOS aarch64 | `release-macos-aarch64` |
-| Windows x86_64 | `release-windows-x86_64` |
-
-```sh
-# list the runs, find the id for the v* tag you want
-gh run list --workflow release.yml
-
-gh run download <run-id> -n release-linux-x86_64 -D ./cfspeed
-tar -xzf ./cfspeed/cfspeed-linux-x86_64.tar.gz
-./cfspeed-linux-x86_64
-```
-
-On Windows the artifact is a zip; the DLLs sit next to `cfspeed.exe` inside it
-and must stay there.
-
-**CI artifacts** (every push to `main` and every PR) are named
-`cfspeed-<os>`, e.g. `cfspeed-windows-latest`:
-
-```sh
-gh run download <run-id> -n cfspeed-ubuntu-latest -D ./out
-```
-
-These are the bare binary only. The Windows one **will not start** without the
-DLLs from a release artifact — prefer the release artifact on Windows.
-
-## Running it
-
-```sh
-cfspeed                 # full test, TUI
-cfspeed --ping          # latency only, skips the transfer phases
-cfspeed --download      # download only
-cfspeed --upload        # upload only
-```
-
-Anything else you pass is currently ignored.
-
-Set `CFS_DEBUG=1` to trace every HTTP request to stderr (URL, curl return code,
-HTTP status, byte counter, chunk size). Off by default — it is a TUI and a wall
-of curl messages would wreck it.
-
-### What a run looks like
-
-Illustrative layout only — these are the real labels, but the values shown are
-placeholders, not a captured run:
+Verified from the published `v0.1.0` Windows artifact:
 
 ```
- cfspeed · FRA · DE                                     0:22  COMPLETE
-────────────────────────────────────────────────────────────────────────
-  YOU   203.0.113.4   Example ISP · AS64496 · DE    ┃ EDGE  FRA   198.51.100.7 …
-────────────────────────────────────────────────────────────────────────
- ↓ DOWNLOAD                     ↑ UPLOAD
- …                             …
-  ████████████████████         █████████████
- …                             …
- avg …  p95 …  max …            avg …  p95 …  max …
-────────────────────────────────────────────────────────────────────────
- IDLE …ms  LOADED …ms  JITTER …ms  LOSS 0.0%  MIN …ms  BLOAT A +…ms  …
-────────────────────────────────────────────────────────────────────────
- LIVE  CHARTS  DETAILS  HISTORY  HELP                  f test  p ping  …
+colo        MAA
+client IP   2001:4490:4e71:49eb:79f9:a61:568b:22fb
+location    IN
+DOWNLOAD    106.5 Mbps avg, p95 111.3
+UPLOAD      113.2 Mbps avg, p95 196.4
+idle        117.5 ms, loss 0%
+grades      stability D, bufferbloat B
 ```
 
-A run is roughly 2 s of idle latency, 10 s of download and 10 s of upload.
+Those figures match an external measurement of the same link taken minutes
+apart, which is the check that matters — a speed test that disagrees with
+reality is worse than no speed test.
 
-One message you may genuinely see, quoted verbatim from `src/engine.c`:
+**Working**
+
+- Live download and upload charts, drawn as bars and redrawn by cell diff
+- Latency, jitter, packet loss, bufferbloat and stability grades
+- Five tabs — LIVE, CHARTS, DETAILS, HISTORY, HELP — switchable by key **or by
+  clicking the tab strip**
+- Run history persisted to disk and restored on next launch
+- Headless `--json` output, verified against a real JSON parser
+- The client IP, the edge colo and the resolved edge addresses shown together
+  on the main view, so it is always clear which is which
+- Mouse click support, with the scroll wheel correctly distinguished from a click
+- Uploads counted only on a 2xx response; a phase that moved no bytes is
+  reported as an error rather than as 0 Mbps
+- Transparent background — no cell is ever painted with an opaque colour except
+  the one selected row, so a terminal theme shows through
+- 49 unit tests covering `stats`, `chart`, `fmt` and `actions`, gating CI
+
+**Known gaps**
+
+- The `m` actions menu has a tested model but no renderer yet, so `m` does
+  nothing.
+- `--duration` is accepted but not yet applied to the engine.
+- Only the Windows artifact has been executed. Linux and macOS are built and
+  their artifacts are published, but they have not been run on a real network.
+- The man page has been validated structurally but never rendered; there was no
+  `groff` available to check it with.
+
+## Install
+
+Grab the archive for your platform from
+[the releases page](https://github.com/msedge-projects/cfspeed-c/releases).
+
+**Windows** — unzip anywhere and run `cfspeed.exe`. The archive is
+self-contained: it carries the libcurl runtime and a CA bundle. Nothing needs
+installing and nothing needs to be on your `PATH`.
+
+**Linux / macOS** — untar and run the binary.
+
+Verify what you downloaded:
 
 ```
-Download transferred no data - Cloudflare refused every request.
-This is rate limiting from repeated testing, not a speed result.
+sha256sum -c checksums.txt
 ```
 
-## Windows prerequisites
+## Why Windows ships a CA bundle
 
-**This is not a standalone Windows build, and it is not the small one.**
+Windows keeps its trust store in a registry database. The libcurl that MSYS2
+provides is backed by GnuTLS, which reads a trust list from a *file* and cannot
+see that database. Without a bundle beside the binary, every HTTPS request
+fails certificate verification and the app measures nothing at all.
 
-- The executable is about **72 KB**. It links libcurl dynamically, so it needs
-  `libcurl-4.dll` and that DLL's own dependency chain sitting in the same
-  directory — **roughly 31 MB** in total. The release workflow copies them
-  beside the exe for you; do not move the exe away from them.
-- You also need a **CA bundle named `cfspeed-ca.pem` next to `cfspeed.exe`**.
-  A Windows curl built against GnuTLS or OpenSSL has no store of its own and
-  every request fails with `CURLE_PEER_FAILED_VERIFICATION` (curl error 60)
-  without one. `src/net.c` looks for that exact filename next to the
-  executable. Verification is never disabled — that would be a security
-  regression on a tool whose entire job is trusting a remote endpoint.
-  **Note: the release workflow packages the DLLs but does not fetch or ship the
-  `.pem`, so a release artifact will measure nothing until you add it yourself:**
+The release workflow fetches the bundle and ships it. On Linux and macOS the
+system store is found automatically and no bundle is needed.
 
-  ```powershell
-  # fetches https://curl.se/ca/cacert.pem and validates it before installing
-  .\scripts\fetch-ca.ps1 -OutPath .\cfspeed-ca.pem
-  ```
+Turning verification off instead would be a security regression on a tool whose
+entire job is trusting a remote endpoint, so it is never an option.
 
-  The script fails hard on a truncated download, because a zero-byte CA file is
-  worse than a missing one: it looks present, so the failure goes silent instead
-  of loud. `scripts/fetch-ca.sh` is the equivalent for the Linux and macOS legs.
-- On Linux and macOS the system CA store is found automatically; there are three
-  common paths checked in order before falling back to the libcurl build default.
+## Usage
 
-So the honest comparison, since binary size was the original motivation for the
-rewrite:
+```
+cfspeed                 run a full test in the TUI
+cfspeed --ping          latency only
+cfspeed --download      download only
+cfspeed --upload        upload only
 
-| | Rust original | This C port |
-|---|---|---|
-| Executable | ~5.25 MB, single file | ~72 KB |
-| Total shipped | ~5.25 MB | **~31 MB** (exe + DLL chain) |
+cfspeed --json          one JSON object on stdout, then exit
+cfspeed --out r.json    also write that JSON to a file
+cfspeed --quiet         no human-readable summary
+cfspeed --iterations 3  run three times
+cfspeed --duration 30   override the phase duration
+cfspeed --no-history    do not record this run
 
-It is much faster to compile and far simpler to read. It is **larger** to ship.
+cfspeed --help
+```
 
-## Keys
+Both `--flag value` and `--flag=value` are accepted.
+
+### Keys
 
 | Key | Action |
 |---|---|
-| `1`–`5`, `?` | select tab (only LIVE has content so far) |
-| `Tab` / `Shift+Tab` | next / previous tab |
-| `f` `p` `d` `u` | run full / latency / download / upload |
-| `r` | restart the current test |
-| `q`, `Esc` | quit |
+| `1`–`5`, `Tab`, `Shift+Tab` | switch tab |
+| click the tab strip | switch tab |
+| `space` | pause / resume the run |
+| `+` `-` `=` | zoom the time axis / reset |
+| `f` `p` `d` `u` | full / ping / download / upload test |
+| `r` | rerun |
+| `e` | export the current result as JSON |
+| `x` | clear history |
+| `?` `H` | help |
+| `q`, `Ctrl+C` | quit |
 
-These are the keys handled by `src/main.c` today. `src/keymap.h` defines a
-richer intended set — pause, zoom, menu, export, mouse — but it is not wired in.
+## Size
 
-Restarting cancels the run in flight first, so a superseded test stops competing
-for bandwidth instead of interleaving its samples into the new one.
+The premise for rewriting this in C was to shrink it. Measured, that did not
+quite hold on Windows, and it is worth being straight about:
 
-## How the numbers are produced
+| | Rust | C |
+|---|---|---|
+| Executable | 5.25 MB, single file | 152 KB |
+| Total shipped | 5.25 MB | **6.49 MB** (exe + 17 DLLs + CA bundle) |
+| Idle CPU | 0.00% | 0.00% |
+| Peak RAM | 4.6 MB | ~0.1 MB |
 
-The part that matters, and the thing that was wrong in an early version:
-
-**Upload is counted only when the server answers 2xx.** The first implementation
-streamed an endless request body and counted bytes as the HTTP client pulled
-them off the socket. That measures bytes handed to the kernel, not bytes
-delivered — it reported momentary rates over 1 Gbps on a link that sustains
-about 130 Mbps. A fixed 1 MiB body counted on a 2xx response is ground truth.
-
-**A phase that moved no bytes is an error, not a 0 Mbps result.** Cloudflare
-rate-limits by payload size and answers HTTP 429 under sustained testing. The
-workers treat a non-2xx as a reason to back off rather than an error, which is
-right mid-phase, so a run in which every request was refused would otherwise
-finish as a confident zero. `finish()` in `src/engine.c` catches that case and
-fails the run explicitly.
-
-**Download requests adapt.** They start at 1 MB, halve on refusal down to a
-100 KB floor, and grow 50% back toward a 4 MB ceiling after eight consecutive
-successes — shrinking fast when refused, growing back slowly when willing.
-
-**Latency is measured in two windows.** Idle and under-load are kept apart
-(`idle` and `loaded_down`); mixing them would corrupt both the baseline and the
-bufferbloat figure.
-
-**Rendering is diffed.** The renderer keeps a front buffer and only writes cells
-that changed. With nothing new to draw the frame is skipped and no bytes go out,
-which is what makes the idle cost zero rather than a few percent of a core. The
-main loop wakes at 33 ms while a test is animating and 250 ms once it is done.
+The C build is far smaller in memory and dramatically smaller on Linux and
+macOS, where no DLL chain has to ship. On Windows it comes out marginally
+larger than the self-contained Rust binary, because libcurl on Windows pulls in
+a GnuTLS stack of roughly 6 MB. Linking a schannel-backed or mbedTLS libcurl
+would change that.
 
 ## Architecture
 
 | File | Owns |
 |---|---|
-| `src/main.c` | the three real flags, the frame loop, key handling, tab index |
-| `src/engine.c/.h` | measurement state machine, phase sequencing, result assembly |
-| `src/net.c/.h` | all HTTP, behind a transport seam — meta/DNS/TLS, latency probe, download & upload worker threads, CA bundle lookup |
-| `src/ui.c/.h` | the LIVE view: header, route strip, charts, tiles, tab bar |
-| `src/term.c/.h` | terminal setup, input decoding, front buffer, frame diff and present |
-| `src/theme.h` | colours and the grade→colour mapping |
-| `src/stats.h`, `src/stats.c` | rate/latency statistics helpers |
-| `src/env_size.h` | minimum screen size and the no-console size fallback |
-| `src/cli.c/.h` | *not compiled, not called* — the full flag set, JSON and summary output |
-| `src/views.c/.h` | *not compiled, not called* — CHARTS / DETAILS / HISTORY / HELP |
-| `src/history.c/.h` | *not compiled, not called* — run history persistence |
-| `src/keymap.c/.h` | *not compiled, not called* — key→action table for the HELP tab |
-| `src/actions.c/.h` | *not compiled, not called* — the action/menu layer |
-| `src/fmt.c/.h`, `src/test.c/.h` | *not compiled* — formatting helpers, test harness |
-| `scripts/fetch-ca.ps1`, `scripts/fetch-ca.sh` | download and validate a CA bundle (not yet called by CI) |
-| `scripts/smoke.sh` | behaviour gate: runs the binary and fails if it measures nothing |
+| `src/main.c` | event loop, key dispatch, history recording |
+| `src/engine.c/.h` | phase state machine, sampling, statistics |
+| `src/net.c/.h` | the only file that talks to libcurl |
+| `src/term.c/.h` | raw mode, cell buffer, diff renderer, input decoding |
+| `src/ui.c/.h` | the LIVE tab and the tab dispatcher |
+| `src/views.c/.h` | CHARTS / DETAILS / HISTORY / HELP |
+| `src/history.c/.h` | run history persistence |
+| `src/cli.c/.h` | flag parsing, JSON and summary output |
+| `src/keymap.c/.h` | the key-to-action table |
+| `src/actions.c/.h` | the actions menu model |
+| `src/stats.c/.h` | percentiles, jitter, CV, grades |
+| `src/chart.c/.h` | chart scaling and bucketing |
+| `src/fmt.c/.h` | number, rate and duration formatting |
+| `src/test.c/.h` | the test harness |
 
-The engine runs as a state machine stepped from the UI's frame loop, so there is
-no second thread that can race the renderer. Only the per-connection workers are
-threads, and each does exactly one thing: accumulate a byte counter.
+The engine never talks to libcurl directly. Everything network-facing goes
+through `net.c`, which is what makes the measurement logic testable and keeps
+the TLS and threading concerns in one place.
 
-## Contributing
+## Building
 
-[`msedge-projects/cfspeed-c`](https://github.com/msedge-projects/cfspeed-c).
-CI builds on Linux, macOS and Windows (MSYS2/MINGW64) for every push and PR.
+Everything is built by GitHub Actions; there is no supported local build.
+Grab an artifact from the [CI runs](https://github.com/msedge-projects/cfspeed-c/actions)
+with:
 
-The single most useful thing you can do is help finish the wiring: call
-`cli_parse()` from `main.c` and add `cli.c` to `SRC` in the Makefile to get the
-headless/JSON mode, and add `views.c` + `history.c` and dispatch on the `tab`
-argument in `ui_draw()` to get the other four tabs.
+```
+gh run download <run-id> --repo msedge-projects/cfspeed-c --name cfspeed-windows-latest
+```
 
-Please do not document features as working before they are — a README that
-overstates the state of the port costs more than a short one.
+Requires a C11 compiler and libcurl headers. On Windows that means MSYS2 with
+the `MINGW64` subsystem.
 
 ## Licence
 
-MIT. See [LICENSE](LICENSE).
+See [LICENSE](LICENSE).

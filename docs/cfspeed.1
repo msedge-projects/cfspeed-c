@@ -119,10 +119,14 @@ range is 0 to 3600.
 is an error in ping mode: a ping run has no transfer phase, so the number would
 have nothing to change. It is rejected rather than accepted and ignored.
 .PP
-The value is currently parsed and validated but not handed to the measurement
-engine, so a transfer phase still runs for its built\-in length. The option is
-described here as the parser accepts it, not as a guarantee about the length of
-a run.
+The value overrides the download and upload phases. It does not shorten the
+latency probe window, which stays at its built\-in length: that window is the
+baseline the bufferbloat figure is measured against, and shortening it would
+change a number this option never claimed to touch. A transfer phase already
+under way keeps its original deadline rather than being cut short, because the
+reported average divides the bytes moved so far by the elapsed time, and
+shortening only the denominator would overstate the result. Values are clamped
+to 1..3600 seconds; 0 restores the built\-in default.
 .TP
 .BI \-\-out " \fIPATH\fR"
 Also write the JSON summary to

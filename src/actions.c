@@ -99,10 +99,17 @@ MenuItem actions_apply(ActionMenu *m, MenuOp op, int running, int paused) {
             /* items[] is gapless - it holds enabled entries only - so one step
              * lands on the next real item and cannot skip onto a disabled one.
              * Wrap rather than stop at the end: a cursor stuck on the last row
-             * reads as a dead key. The op carries no direction, so this is the
-             * forward step (down / j); the key layer owns "up". */
+             * reads as a dead key. */
             if (m->open && m->count > 0) {
                 m->sel = (m->sel + 1) % m->count;
+            }
+            break;
+
+        case ACTMENU_NAVIGATE_BACK:
+            if (m->open && m->count > 0) {
+                /* count is never 0 inside this branch, so the unsigned
+                 * subtraction below cannot wrap. */
+                m->sel = (m->sel + m->count - 1) % m->count;
             }
             break;
 

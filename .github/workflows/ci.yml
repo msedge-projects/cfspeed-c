@@ -74,3 +74,76 @@ jobs:
           name: cfspeed-${{ matrix.os }}
           path: cfspeed*
           if-no-files-found: error
+
+      # -----------------------------------------------------------------------
+      # Behavioural gate.
+      #
+      # Every step above proves the code compiles. Not one of them proves the
+      # thing measures anything, and both of this project's worst regressions
+      # compiled cleanly and shipped behind a green build:
+      #
+      #   - Windows libcurl is GnuTLS-backed, GnuTLS reads trust anchors from a
+      #     file, and Windows keeps its trust store in a registry database that
+      #     only schannel can read. Every request died with
+      #     CURLE_PEER_FAILED_VERIFICATION (curl error 60) and cfspeed reported
+      #     nothing at all.
+      #   - speed.cloudflare.com/meta began answering {}, so colo, client IP and
+      #     location all came back blank while the build stayed green.
+      #
+      # scripts/smoke.sh closes that gap: it runs the binary built above,
+      # parses stdout with a real JSON parser (python3/python - never a grep),
+      # and fails unless the document parses, download.avg > 0,
+      # download.bytes > 0, and meta.colo is a non-empty string. A binary that
+      # runs, exits 0 and reports zeros must NOT pass.
+      #
+      # Deliberately no continue-on-error anywhere on this path: a run that
+      # measured nothing has to fail the job, not annotate it.
+      #
+      # These steps sit after the upload on purpose. The Windows leg writes
+      # cfspeed-ca.pem into the workspace root, and the artifact glob is
+      # `cfspeed*` - running the gate first would silently change what gets
+      # uploaded.
+
+      # No cfspeed-ca.pem on Linux or macOS, and that is the code's own view,
+      # not an assumption: use_ca_bundle() in src/net.c only probes for the
+      # bundle inside `#if defined(_WIN32)`. The POSIX branch points at
+      # /etc/ssl/certs/ca-certificates.crt and otherwise falls through to
+      # curl's default, which finds the system store unaided on both runners.
+      - name: Smoke test (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        # A full run is ~30-40s. This is headroom for a cold runner and a slow
+        # network, and it is still finite, so a wedged run fails instead of
+        # hanging the job until the 6h ceiling.
+        timeout-minutes: 5
+        run: bash scripts/smoke.sh ./cfspeed
+
+      - name: Smoke test (macOS)
+        if: matrix.os == 'macos-latest'
+        timeout-minutes: 5
+        run: bash scripts/smoke.sh ./cfspeed
+
+      # Windows is the leg that genuinely needs help, and it is the leg that
+      # silently shipped the curl-60 bug twice. src/net.c probes for
+      # cfspeed-ca.pem next to the executable; fetch-ca.sh writes it into the
+      # workspace root, which is where the freshly built cfspeed.exe sits.
+      # (fetch-ca.sh over fetch-ca.ps1 here purely because this step already
+      # runs inside the MSYS2 shell - same contract, same validation, no
+      # PowerShell-through-MSYS2 path translation.)
+      #
+      # No DLL staging is needed: /mingw64/bin is already on PATH inside this
+      # shell, so libcurl and its transitive GnuTLS/nettle chain resolve.
+      #
+      # On python: windows-latest ships python but not python3, and the MSYS2
+      # shell inherits the Windows PATH. smoke.sh probes python3 then python
+      # and actually executes the candidate before trusting it, so the
+      # Microsoft Store execution alias - which prints "Python was not found"
+      # and exits non-zero - cannot be mistaken for a real interpreter. If
+      # neither exists the script fails loudly rather than passing vacuously.
+      - name: Smoke test (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: msys2 {0}
+        timeout-minutes: 5
+        run: |
+          export PATH="/mingw64/bin:$PATH"
+          bash scripts/fetch-ca.sh cfspeed-ca.pem
+          bash scripts/smoke.sh ./cfspeed.exe

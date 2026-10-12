@@ -16,7 +16,8 @@
 typedef enum {
     ACTMENU_NONE = 0,     /* closed */
     ACTMENU_OPEN,
-    ACTMENU_NAVIGATE,     /* up/down or j/k; changes the highlight only */
+    ACTMENU_NAVIGATE,     /* down / j; changes the highlight only */
+    ACTMENU_NAVIGATE_BACK,/* up / k */
     ACTMENU_TOGGLE,       /* enter or space: choose the highlighted item */
     ACTMENU_CANCEL        /* esc or m again: close without acting */
 } MenuOp;
@@ -56,9 +57,10 @@ int  actions_enabled(MenuItem it, int running, int paused);
  * Safe on a zero-initialised or never-initialised menu, and when nothing is
    enabled: callers never have to check before calling.
  *
- * ACTMENU_NAVIGATE carries no direction, so it moves the highlight one step
- * forward (down / j) with wraparound. The key layer is the only place that
- * knows which key was pressed, which is why the direction is not baked in
+ * ACTMENU_NAVIGATE moves the highlight one step forward (down / j) with
+ * wraparound; ACTMENU_NAVIGATE_BACK moves it one step back (up / k). Both skip
+ * disabled rows. The key layer is the only place that knows which key was
+ * pressed, which is why the direction is not baked in
  * here - see the NAVIGATE case in actions.c. */
 MenuItem actions_apply(ActionMenu *m, MenuOp op, int running, int paused);
 

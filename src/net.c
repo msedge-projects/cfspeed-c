@@ -280,6 +280,38 @@ static void url_host(const char *url, char *out, size_t cap) {
     out[i] = '\0';
 }
 
+/* Write `src` into a fixed-size Meta field, truncating at `cap - 1` bytes.
+ *
+ * Every Meta field below is a fixed C array fed by server-controlled JSON, so a
+ * hostile or merely verbose response can hand us a string far longer than the
+ * field. `snprintf(dst, sizeof dst, "%s", src)` does truncate, correctly, but
+ * it says nothing to the compiler about how much it can write, so
+ * -Wformat-truncation flagged all ten of these call sites and any build that
+ * adds -Werror would fail.
+ *
+ * The bound is made explicit here instead, by writing the terminator at an
+ * index the compiler can check against the buffer: `n` is clamped to cap - 1,
+ * so the loop-free copy below touches at most indices 0..cap-2 and then
+ * dst[cap-1]. Both are inside a cap-byte object, for any cap, with no
+ * dependence on the optimisation level.
+ *
+ * A "%.*s" precision was the obvious alternative and passes at -O2, but it
+ * only reads as bounded because GCC relates the precision argument to the
+ * buffer size argument. Once this is inlined at -Os or -O0 that relationship is
+ * lost and the same ten sites warn again - with GCC even pairing one call's
+ * precision with another call's destination size. Making the bound structural
+ * rather than format-driven is what makes it hold in every build.
+ *
+ * Truncation is preserved, not turned into rejection: an over-long value is
+ * still stored, just clipped, which is what the UI wants to display. */
+static void copy_field(char *dst, size_t cap, const char *src) {
+    if (!dst || !src || cap == 0) return;
+    size_t n = strlen(src);
+    if (n > cap - 1) n = cap - 1;
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
 /* /cdn-cgi/trace answers a flat "key=value" listing, one pair per line.
  *
  * Matching is anchored to the start of a line. A plain strstr for "ip=" would
@@ -398,20 +430,20 @@ void net_fetch_meta(const char *base_url, Meta *m) {
         if (curl_easy_perform(c) == CURLE_OK && sink.buf) {
             char v[256];
             if (trace_field(sink.buf, "ip", v, sizeof v))
-                snprintf(m->ip, sizeof m->ip, "%s", v);
+                copy_field(m->ip, sizeof m->ip, v);
             if (trace_field(sink.buf, "colo", v, sizeof v))
-                snprintf(m->colo, sizeof m->colo, "%s", v);
+                copy_field(m->colo, sizeof m->colo, v);
             if (trace_field(sink.buf, "loc", v, sizeof v))
-                snprintf(m->loc, sizeof m->loc, "%s", v);
+                copy_field(m->loc, sizeof m->loc, v);
             if (trace_field(sink.buf, "warp", v, sizeof v))
-                snprintf(m->warp, sizeof m->warp, "%s", v);
+                copy_field(m->warp, sizeof m->warp, v);
             if (trace_field(sink.buf, "tls", v, sizeof v))
-                snprintf(m->tls, sizeof m->tls, "%s", v);
+                copy_field(m->tls, sizeof m->tls, v);
             if (trace_field(sink.buf, "http", v, sizeof v)) {
                 /* trace reports "http/1.1"; the UI shows it as a protocol. */
                 for (size_t i = 0; v[i] && i < 4; i++)
                     if (v[i] >= 'a' && v[i] <= 'z') v[i] = (char)(v[i] - 32);
-                snprintf(m->http, sizeof m->http, "%s", v);
+                copy_field(m->http, sizeof m->http, v);
             }
         }
         free(sink.buf);
@@ -434,19 +466,19 @@ void net_fetch_meta(const char *base_url, Meta *m) {
             if (p) {
                 const char *o = strchr(p, '{');
                 if (o && json_str(o, "name", tmp, sizeof tmp))
-                    snprintf(m->asn_org, sizeof m->asn_org, "%s", tmp);
+                    copy_field(m->asn_org, sizeof m->asn_org, tmp);
             }
             const char *a = strstr(sink.buf, "\"asn\"");
             if (a && json_str(a, "asn", tmp, sizeof tmp))
-                snprintf(m->asn, sizeof m->asn, "%s", tmp);
+                copy_field(m->asn, sizeof m->asn, tmp);
             const char *t = strstr(sink.buf, "\"tls\"");
             if (t) {
                 const char *o = strchr(t, '{');
                 if (o) {
                     if (json_str(o, "tlsVersion", tmp, sizeof tmp) && !m->tls[0])
-                        snprintf(m->tls, sizeof m->tls, "%s", tmp);
+                        copy_field(m->tls, sizeof m->tls, tmp);
                     if (json_str(o, "cipher", tmp, sizeof tmp))
-                        snprintf(m->tls_cipher, sizeof m->tls_cipher, "%s", tmp);
+                        copy_field(m->tls_cipher, sizeof m->tls_cipher, tmp);
                 }
             }
         }
@@ -633,7 +665,15 @@ static void *worker_main(void *arg) {
     }
 
     curl_easy_cleanup(c);
-#if !defined(_WIN32)
+#if defined(_WIN32)
+    /* Both exits from a thread procedure must be explicit. This tail used to
+     * return only under `#if !defined(_WIN32)`, so the Windows build fell off
+     * the end of a non-void DWORD function: undefined behaviour, and a
+     * -Wreturn-type warning on every Win32 compile. CreateThread ignores the
+     * return value for a plain thread, so 0 here matches the early exit above
+     * and changes nothing about how the thread ends. */
+    return 0;
+#else
     return NULL;
 #endif
 }

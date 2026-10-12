@@ -16,13 +16,14 @@ endif
 
 SRC := src/main.c src/term.c src/net.c src/engine.c src/ui.c \
        src/history.c src/views.c src/cli.c \
-       src/stats.c src/chart.c src/fmt.c src/keymap.c src/actions.c
+       src/stats.c src/chart.c src/fmt.c src/keymap.c src/actions.c \
+       src/menu.c
 OBJ := $(SRC:.c=.o)
 BIN := cfspeed
 
 HDRS := src/term.h src/net.h src/engine.h src/ui.h src/theme.h src/env_size.h \
        src/history.h src/views.h src/cli.h src/stats.h src/chart.h \
-       src/fmt.h src/keymap.h src/actions.h
+       src/fmt.h src/keymap.h src/actions.h src/menu.h
 
 all: $(BIN)
 
@@ -32,15 +33,21 @@ $(BIN): $(OBJ)
 %.o: %.c $(HDRS)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-# The test binary links only the modules with no libcurl dependency, so it
-# builds and runs anywhere without the transport layer.
-TESTSRC := tests/test_units.c src/test.c src/stats.c src/chart.c src/fmt.c src/actions.c
+# The pure modules - stats, chart, fmt, actions - carry no libcurl dependency,
+# so the suite builds and runs without a network.
+TESTMODS := src/test.c src/stats.c src/chart.c src/fmt.c src/actions.c
+TESTSRC := tests/test_units.c $(TESTMODS)
+HISTTEST := tests/test_history.c src/test.c src/history.c
 
 test: $(TESTSRC)
 	$(CC) $(CFLAGS) -Isrc -o test_units $^ $(LDFLAGS) -lm
 	./test_units
 
-clean:
-	rm -f $(OBJ) $(BIN) test_units
+test-history: $(HISTTEST)
+	$(CC) $(CFLAGS) -Isrc -o test_history $^ $(LDFLAGS) -lm
+	./test_history
 
-.PHONY: all clean test
+clean:
+	rm -f $(OBJ) $(BIN) test_units test_history
+
+.PHONY: all clean test test-history

@@ -11,10 +11,12 @@
 
 #include "env_size.h"
 
+#include "actions.h"
 #include "cli.h"
 #include "engine.h"
 #include "history.h"
 #include "keymap.h"
+#include "menu.h"
 #include "term.h"
 #include "ui.h"
 
@@ -161,6 +163,10 @@ int main(int argc, char **argv) {
         if (w < MIN_SCREEN_W) w = 120;
         if (h < MIN_SCREEN_H) h = 40;
     }
+    /* Must come before the loop: engine_new has already started a run, so a
+     * duration set later would only apply from the next one. */
+    engine_set_duration(e, opt.duration_s);
+
     Screen *scr = screen_create(w, h);
     if (!scr) {
         term_shutdown();
@@ -188,11 +194,14 @@ int main(int argc, char **argv) {
      * for as long as the app stayed open. */
     int recorded = 0;
     int paused = 0;
+    ActionMenu menu;
+    actions_init(&menu);
     uint64_t last_tick = now_ms();
 
     while (running) {
         if (dirty) {
             ui_draw(scr, e, hist, g_view, g_zoom);
+            menu_draw(scr, &menu);
             frame_present(scr);
             dirty = 0;
         }
@@ -222,6 +231,55 @@ int main(int argc, char **argv) {
                 continue;
             }
         }
+        /* While the menu is open it owns navigation: the global bindings would
+         * otherwise fire behind it, so 'r' would restart a test the user
+         * believes is merely highlighting a row. */
+        if (menu.open && ev.type == EV_KEY) {
+            if (ev.key == KEY_UP) {
+                actions_apply(&menu, ACTMENU_NAVIGATE_BACK, 1, paused);
+                dirty = 1;
+                continue;
+            }
+            if (ev.key == KEY_DOWN || (ev.key == KEY_CHAR && (ev.ch == 'j'))) {
+                actions_apply(&menu, ACTMENU_NAVIGATE, 1, paused);
+                dirty = 1;
+                continue;
+            }
+            if (ev.key == KEY_ENTER) {
+                MenuItem it = actions_apply(&menu, ACTMENU_TOGGLE, 1, paused);
+                if (it != ITEM_COUNT) {
+                    switch (it) {
+                        case ITEM_PAUSE:
+                        case ITEM_RESUME:
+                            if (paused) { engine_restart(e, engine_mode(e)); paused = 0; recorded = 0; }
+                            else { engine_cancel(e); paused = 1; }
+                            break;
+                        case ITEM_RERUN:
+                            engine_restart(e, engine_mode(e));
+                            recorded = 0; paused = 0;
+                            break;
+                        case ITEM_ZOOM_IN:   if (g_zoom < 16) g_zoom *= 2; break;
+                        case ITEM_ZOOM_OUT:  if (g_zoom > 1)  g_zoom /= 2; break;
+                        case ITEM_ZOOM_RESET: g_zoom = 1; break;
+                        case ITEM_EXPORT_JSON: cli_json(e); break;
+                        case ITEM_CLEAR_HISTORY:
+                            if (hist) history_clear(hist);
+                            ui_set_history_sel(0);
+                            break;
+                        case ITEM_QUIT: running = 0; break;
+                        default: break;
+                    }
+                }
+                dirty = 1;
+                continue;
+            }
+            if (ev.key == KEY_ESC) {
+                actions_apply(&menu, ACTMENU_CANCEL, 1, paused);
+                dirty = 1;
+                continue;
+            }
+        }
+
         if (ev.type == EV_KEY || ev.type == EV_MOUSE) {
             TermKey k = keymap_from_event(ev);
             switch (keymap_action(k, ev.mx, ev.my)) {
@@ -274,6 +332,10 @@ int main(int argc, char **argv) {
                 case ACT_CLEAR_HISTORY:
                     if (hist) history_clear(hist);
                     ui_set_history_sel(0);
+                    dirty = 1;
+                    break;
+                case ACT_MENU:
+                    actions_apply(&menu, menu.open ? ACTMENU_CANCEL : ACTMENU_OPEN, 1, paused);
                     dirty = 1;
                     break;
                 case ACT_QUIT: running = 0; break;

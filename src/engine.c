@@ -15,6 +15,20 @@
 #define CHUNK_START 1000000ul
 #define CHUNK_MIN   100000ul
 
+/* The accepted range for engine_set_duration(), matching the documented
+ * --duration range. The parser already enforces 0..3600, which makes this look
+ * redundant. It is not: this is the only place a caller's number becomes a
+ * deadline, so the bound belongs here rather than being assumed of everything
+ * that can reach the function. */
+#define MAX_DURATION_S 3600
+/* 0 already carries a meaning - "use the built-in default" - so it cannot
+ * double as the floor. A phase of zero length would start workers, expire
+ * before the next poll ever reached it, and finalise with no samples over a
+ * duration_ms of 0, which stats_finalise() reports as a zero average: a broken
+ * link wearing the number the user asked for. One second is short enough to be
+ * what someone testing the flag wanted and long enough to produce a figure. */
+#define MIN_DURATION_S 1
+
 struct Engine {
     char base[256];
     Mode mode;
@@ -23,6 +37,13 @@ struct Engine {
     uint64_t run_start;
     uint64_t phase_end;
     int      finished;
+
+    /* Length of a transfer phase, in ms, or 0 for "use the built-in default".
+     * This is the whole of what engine_set_duration() stores: the clamp, the
+     * unit and the reset all happen at the point the value is written, so
+     * every reader below can treat a non-zero field as already in range and
+     * already in milliseconds. */
+    uint64_t duration_ms;
 
     uint64_t counter;             /* shared with the workers */
     Worker   cfg;
@@ -51,6 +72,44 @@ struct Engine {
     RunResult result;
     char      error[256];
 };
+
+/* --------------------------------------------------------------- duration */
+
+/* The length a transfer phase runs for: the override when one is in force, the
+ * caller's phase default otherwise. `def` stays a parameter rather than the
+ * helper naming DOWN_MS itself, so the two phases keep naming their own default
+ * at the call site and the day they diverge is a one-line change here rather
+ * than a hunt through a comment. */
+static uint64_t transfer_ms(const Engine *e, uint64_t def) {
+    return e->duration_ms ? e->duration_ms : def;
+}
+
+/* IDLE_MS is deliberately NOT governed by engine_set_duration(), and the
+ * argument for overriding it is strong enough that the decision belongs in the
+ * source rather than in a commit message.
+ *
+ * It is called the idle *latency* window, and it feeds result.idle, which is
+ * the baseline the bufferbloat figure is subtracted from:
+ * bufferbloat_ms = loaded_down.med - idle.med. The comment on the probe buffers
+ * above spells out why the two windows must not be mixed. Shortening this one
+ * does not shorten a run that took longer to measure - it degrades the median
+ * and the p95 of the baseline half of the bufferbloat number, in order to make
+ * a phase the flag never mentioned finish sooner. That is a trade the user
+ * cannot have meant to make: they asked to change how long they push bytes.
+ *
+ * The stronger argument is that --duration is defined, everywhere it is
+ * described, as an override of "each transfer phase" - the usage text, the man
+ * page and all three shell completions use that phrase. The parser is built on
+ * the same distinction: cli_validate() rejects --duration in ping mode because
+ * "a ping run has no transfer phase, so the number would have nothing to
+ * change". If IDLE_MS followed the override that rejection would be false on
+ * its own terms, because in MODE_LATENCY the probe window is the entire run
+ * and there would be plenty for the number to change.
+ *
+ * And the surprise the override would remove is smaller than it sounds. The
+ * probe phase is 2 s, not 10 s, and it is not a transfer at all: a --duration 5
+ * run spends 2 s measuring latency and 5 s measuring throughput, and says so.
+ */
 
 /* ------------------------------------------------------------- statistics */
 
@@ -253,6 +312,48 @@ Engine *engine_new(const char *base_url, Mode mode) {
     return e;
 }
 
+/* Override the transfer phase length, in seconds. Zero or less restores the
+ * built-in defaults; anything above MAX_DURATION_S is clamped down.
+ *
+ * WHY THIS WORKS FOR THE VERY FIRST RUN, which is the part that is not
+ * obvious. engine_new() does leave a run in flight: it sets phase to PH_IDLE
+ * and phase_start to now_ms(), so the idle window is already counting down by
+ * the time this returns to main.c. But that run has not captured a duration
+ * anywhere. DOWN_MS and UP_MS were never stored into the Engine at construction;
+ * they were read as constants at the two transitions inside engine_poll(), and
+ * they still are, through transfer_ms() above. So the first transfer phase
+ * cannot have missed an override written after engine_new() - it is decided
+ * when the phase starts, which is IDLE_MS later, which is later than this
+ * call. Nothing has to be rewound or replayed, and no run-start timestamp is
+ * adjusted, because there is no per-run duration to bring forward. The phase
+ * that is genuinely in flight at this moment is the idle window, which by the
+ * decision documented above the override deliberately does not govern.
+ *
+ * A phase that has already started transferring keeps the deadline it has.
+ * Pulling phase_end forward mid-phase would be the dishonest way to honour the
+ * override: stats_finalise() divides the phase's cumulative byte counter by
+ * (phase_end - phase_start), so shortening the denominator while the numerator
+ * keeps counting bytes already transferred reports an average several times too
+ * high, and the error is in the headline number rather than in the timing. The
+ * override governs every transfer phase that begins after this returns, which
+ * is what a caller setting it between runs means, and what makes the very first
+ * run pick it up as shown above.
+ */
+void engine_set_duration(Engine *e, int seconds) {
+    if (!e) return;
+    /* Below the floor means "no override", not "clamp up to the floor". Zero and
+     * negatives are how the flag spells its own default, and rounding one of
+     * them up to MIN_DURATION_S would replace a default 10 s phase with a 1 s
+     * one: the user asking to go back to normal and getting something that is
+     * neither the default nor what they typed. */
+    if (seconds < MIN_DURATION_S) {
+        e->duration_ms = 0;
+        return;
+    }
+    if (seconds > MAX_DURATION_S) seconds = MAX_DURATION_S;
+    e->duration_ms = (uint64_t)seconds * 1000u;
+}
+
 void engine_free(Engine *e) {
     if (!e) return;
     engine_cancel(e);
@@ -320,6 +421,16 @@ void engine_restart(Engine *e, Mode mode) {
     e->run_start = e->last_time;
     e->phase_start = e->last_time;
     e->error[0] = '\0';
+
+    /* duration_ms is deliberately NOT cleared. It is a setting for the process,
+     * handed over from --duration at startup, not state belonging to the run
+     * being abandoned: a test re-run with 'r', or the second and later
+     * iterations of a headless run, must still run at the length the user asked
+     * for rather than snapping back to the default once the first run ends.
+     * Nothing here has to force it either - the cleared state above plus the
+     * next transition re-reading transfer_ms() is the whole mechanism, which is
+     * why a restart honours the override and not merely the run that follows
+     * it. */
 
     /* The sample buffers are deliberately not zeroed, only their counts. Every
      * reader - the live charts, summarise_latency, stats_finalise - is bounded
@@ -414,10 +525,10 @@ int engine_poll(Engine *e) {
                 e->finished = 1;
                 return 0;
             }
-            start_workers(e, 0, DOWN_MS);
+            start_workers(e, 0, transfer_ms(e, DOWN_MS));
             e->phase = PH_DOWNLOAD;
             e->phase_start = t;
-            e->phase_end = t + DOWN_MS;
+            e->phase_end = t + transfer_ms(e, DOWN_MS);
             e->ndown = 0;
             e->last_bytes = 0;
             e->last_time = t;
@@ -464,10 +575,10 @@ int engine_poll(Engine *e) {
 
             if (!up) {
                 if (e->mode == MODE_DOWNLOAD) { finish(e); return 0; }
-                start_workers(e, 1, UP_MS);
+                start_workers(e, 1, transfer_ms(e, UP_MS));
                 e->phase = PH_UPLOAD;
                 e->phase_start = t;
-                e->phase_end = t + UP_MS;
+                e->phase_end = t + transfer_ms(e, UP_MS);
                 e->nup = 0;
                 e->last_bytes = 0;
                 e->last_time = t;
