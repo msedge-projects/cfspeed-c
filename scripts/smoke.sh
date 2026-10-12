@@ -81,8 +81,7 @@ if [ -z "$py" ]; then
             if (-not $j.meta) { $bad += "no meta object" }
             elseif (-not $j.meta.colo) { $bad += "meta.colo is empty" }
             if ($bad.Count) { $bad | ForEach-Object { [Console]::Error.WriteLine($_) }; exit 1 }
-            [Console]::Out.WriteLine("smoke: OK  down={0:N1} Mbps  bytes={1}  colo={2}" -f `
-                [double]$j.download.avg, [int64]$j.download.bytes, $j.meta.colo)
+            [Console]::Out.WriteLine(("smoke: OK  down={0:N1} Mbps  bytes={1}  colo={2}" -f [double]$j.download.avg, [int64]$j.download.bytes, $j.meta.colo))
         ' <"$stdout_file" || fail "the run produced no usable measurement"
         log "smoke: PASS"
         exit 0

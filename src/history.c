@@ -274,7 +274,18 @@ int history_save(const History *h) {
 
     fputs("[\n", f);
     /* Oldest first, so dropping the head keeps the newest MAX_RUNS. The
-     * caller's array is const and is left alone. */
+     * caller's array is const and is left alone.
+     *
+     * count > MAX_RUNS cannot arise from a History this module or the UI ever
+     * builds - both hold the array to MAX_RUNS - so it only happens when the
+     * caller's storage carries records past the end of runs[], and the caller
+     * is claiming those too. Clamping the count instead would be the
+     * memory-safe answer, but it would persist the OLDEST MAX_RUNS of an
+     * overfull history, which is the exact opposite of what history.h
+     * promises and the exact opposite of what a caller with more than
+     * MAX_RUNS runs is asking for. So the window is taken, not clamped.
+     * start cannot overflow: count is already known to be positive and above
+     * MAX_RUNS here. */
     int start = (h->count > MAX_RUNS) ? h->count - MAX_RUNS : 0;
     for (int i = start; i < h->count; i++) {
         if (write_run(f, &h->runs[i]) != 0) {

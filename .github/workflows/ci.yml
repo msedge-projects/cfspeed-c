@@ -150,12 +150,14 @@ jobs:
       # No DLL staging is needed: /mingw64/bin is already on PATH inside this
       # shell, so libcurl and its transitive GnuTLS/nettle chain resolve.
       #
-      # On python: windows-latest ships python but not python3, and the MSYS2
-      # shell inherits the Windows PATH. smoke.sh probes python3 then python
-      # and actually executes the candidate before trusting it, so the
-      # Microsoft Store execution alias - which prints "Python was not found"
-      # and exits non-zero - cannot be mistaken for a real interpreter. If
-      # neither exists the script fails loudly rather than passing vacuously.
+      # On the JSON parser: this leg must not depend on `python3`, which
+      # windows-latest does not put on PATH. smoke.sh resolves an interpreter
+      # itself - python3, then python, then pwsh/powershell ConvertFrom-Json -
+      # and actually executes the candidate before trusting it, so the Microsoft
+      # Store execution alias (which prints "Python was not found" and exits
+      # non-zero) cannot be mistaken for a working interpreter. All three are
+      # real parsers. If none is found the script fails loudly rather than
+      # passing vacuously.
       - name: Smoke test (Windows)
         if: matrix.os == 'windows-latest'
         shell: msys2 {0}
