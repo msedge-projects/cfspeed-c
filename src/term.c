@@ -20,6 +20,21 @@ static Screen *g_front = NULL; /* what the terminal currently shows */
 static Screen *g_back = NULL;  /* what we are building this frame */
 static int g_alt_screen = 0;
 
+/* Geometry term.c has actually adopted for g_front, and therefore the geometry
+ * the application believes it is rendering at.
+ *
+ * The invariant this exists to protect: EV_RESIZE is raised exactly once per
+ * *real* change of console geometry, and never again for a change that has
+ * already been reported. It used to be tested against g_back, which is created
+ * once in term_init and never resized, so after the user dragged the window
+ * once term_size() and g_back disagreed forever and every ~100ms read timeout
+ * returned EV_RESIZE - main.c `continue`s on that, so the run froze while the
+ * workers kept saturating the link. g_ack_w/h is updated at the only two
+ * points where term.c genuinely adopts a geometry (term_init, and the resize
+ * inside frame_present), so it tracks reality instead of a stale allocation.
+ */
+static int g_ack_w = 0, g_ack_h = 0;
+
 #if defined(_WIN32)
 static HANDLE g_in = INVALID_HANDLE_VALUE;
 static DWORD  g_old_in = 0;
@@ -124,6 +139,9 @@ int term_init(void) {
     if (term_size(&w, &h) != 0) { w = 80; h = 24; }
     g_front = screen_create(w, h);
     g_back = screen_create(w, h);
+    /* Adopt the geometry we just allocated, so the first real resize is the
+     * first thing term_poll reports rather than a perpetual false positive. */
+    if (g_front) { g_ack_w = g_front->w; g_ack_h = g_front->h; }
     return (g_front && g_back) ? 0 : -1;
 }
 
@@ -142,6 +160,7 @@ void term_shutdown(void) {
     screen_free(g_front);
     screen_free(g_back);
     g_front = g_back = NULL;
+    g_ack_w = g_ack_h = 0;
 }
 
 /* ----------------------------------------------------------------- input */
@@ -173,11 +192,19 @@ static int posix_read_byte(unsigned char *out) {
 #endif
 
 static int read_byte(unsigned char *out) {
+    int ok;
 #if defined(_WIN32)
-    return win_read_byte(out);
+    ok = win_read_byte(out);
 #else
-    return posix_read_byte(out);
+    ok = posix_read_byte(out);
 #endif
+    /* *out is always defined, success or failure. The sub-readers above leave
+     * it untouched when they time out, which let a digit loop below re-test the
+     * previous digit forever: a truncated escape sequence followed by a 100ms
+     * input gap was enough to wedge the process at full tilt. Callers can now
+     * trust that *out means something even on a zero return. */
+    if (!ok) *out = 0;
+    return ok;
 }
 
 /* Prefixed: <imm.h> already defines MOD_SHIFT/MOD_ALT on Windows. */
@@ -193,7 +220,12 @@ Event term_poll(void) {
     if (!read_byte(&c)) {
         /* A read timeout is not an error; the caller keeps its own clock. */
         int w, h;
-        if (term_size(&w, &h) == 0 && g_back && (g_back->w != w || g_back->h != h)) {
+        /* Compare against the geometry term.c has adopted, not against g_back,
+         * which is created once and never resized. See the g_ack_w/g_ack_h note
+         * above: reported once per change, because frame_present updates it at
+         * the moment it adopts the new geometry. */
+        if (term_size(&w, &h) == 0 && g_front &&
+            (g_ack_w != w || g_ack_h != h)) {
             ev.type = EV_RESIZE;
         }
         return ev;
@@ -225,20 +257,42 @@ Event term_poll(void) {
     if (!read_byte(&c)) { ev.type = EV_KEY; ev.key = KEY_ESC; return ev; }
 
     if (c == '<') {
-        /* SGR mouse: ESC [ < button ; col ; row M|m. Only presses are used. */
+        /* SGR mouse: ESC [ < button ; col ; row M|m. Only presses are used,
+         * and "press" is exactly what the trailing 'M' says - 'm' is the
+         * release. Nothing here re-checks the motion bit for that, because a
+         * plain press does not have it set. */
         unsigned int b = 0, col = 0, row = 0;
         char tail = 0;
-        if (!read_byte((unsigned char *)&b)) return ev;
-        while (read_byte((unsigned char *)&c) && c >= '0' && c <= '9')
-            col = col * 10 + (unsigned)(c - '0');
-        if (!read_byte((unsigned char *)&c)) return ev;
-        while (c >= '0' && c <= '9') { row = row * 10 + (unsigned)(c - '0'); read_byte((unsigned char *)&c); }
+
+        /* Read-then-loop, not loop-then-read: the old code consumed one byte
+         * too many after ';' and ran every field one byte out of phase, so the
+         * terminator was never 'M' and EV_MOUSE could not be produced at all.
+         * Every digit loop checks the read, so a truncated sequence returns
+         * instead of spinning on a stale byte. */
+        if (!read_byte(&c)) return ev;                          /* button */
+        while (c >= '0' && c <= '9') {
+            if (b < 100000u) b = b * 10u + (unsigned)(c - '0');
+            if (!read_byte(&c)) return ev;
+        }
+        if (c != ';') return ev;
+        if (!read_byte(&c)) return ev;                          /* column */
+        while (c >= '0' && c <= '9') {
+            if (col < 100000u) col = col * 10u + (unsigned)(c - '0');
+            if (!read_byte(&c)) return ev;
+        }
+        if (c != ';') return ev;
+        if (!read_byte(&c)) return ev;                          /* row */
+        while (c >= '0' && c <= '9') {
+            if (row < 100000u) row = row * 10u + (unsigned)(c - '0');
+            if (!read_byte(&c)) return ev;
+        }
         tail = (char)c;
         /* Bits 6 and 7 are the scroll wheel and the extra buttons, and they
          * share their low two bits with left/middle/right. Masking to b & 0x03
          * alone collapses wheel-up onto the same mbtn as a real left click, so
-         * scrolling over the tab strip silently flips the user's tab. */
-        if (tail == 'M' && (b & 0x20) && !(b & 0xC0)) {
+         * scrolling over the tab strip silently flips the user's tab. Hence the
+         * 0xC0 exclusion below. */
+        if (tail == 'M' && !(b & 0xC0)) {
             ev.type = EV_MOUSE;
             ev.mx = (int)col - 1;
             ev.my = (int)row - 1;
@@ -357,17 +411,27 @@ int cell_text(Screen *s, int x, int y, int max, const char *text, uint32_t fg,
               uint32_t bg, int bold) {
     int col = x;
     const char *p = text;
-    while (*p && col < x + max) {
+    /* Bytes left before the terminator. The lead byte alone says how long the
+     * sequence claims to be, which is no guarantee those bytes exist: a
+     * server-supplied string whose last byte is >= 0xF0 used to send memcpy
+     * three bytes past the NUL. Tracking the real remaining length means the
+     * copy can never cross it. */
+    size_t left = strlen(text);
+    while (left > 0 && col < x + max) {
         int wch = utf8_width_char(p);
-        int n = 1;
-        if ((unsigned char)*p >= 0xF0) n = 4;
-        else if ((unsigned char)*p >= 0xE0) n = 3;
-        else if ((unsigned char)*p >= 0xC0) n = 2;
+        size_t n = 1;
+        unsigned char lead = (unsigned char)*p;
+        if (lead >= 0xF0) n = 4;
+        else if (lead >= 0xE0) n = 3;
+        else if (lead >= 0xC0) n = 2;
+        if (n > left) n = left; /* truncated tail: copy only what exists */
+        if (n > 4) n = 4;
         char buf[5] = {0};
-        memcpy(buf, p, (size_t)(n < 4 ? n : 4));
+        memcpy(buf, p, n);
         if (col < x + max) cell_put(s, col, y, buf, fg, bg, bold, 0);
         col += wch;
         p += n;
+        left -= n;
     }
     return col - x;
 }
@@ -398,6 +462,9 @@ void frame_invalidate(void) {
 }
 
 void frame_present(Screen *s) {
+    /* Both buffers are reachable from outside this file and can legitimately be
+     * absent - zz_integrity.c calls this before term_init. */
+    if (!s || !g_front) return;
     int w = 0, h = 0;
     /* A failed query must not be treated as a resize to 0x0. */
     if (term_size(&w, &h) != 0) w = g_front->w, h = g_front->h;
@@ -407,6 +474,10 @@ void frame_present(Screen *s) {
         if (!nf) return;
         screen_free(g_front);
         g_front = nf;
+        /* The adopted geometry is now what the app renders at; syncing the
+         * ack here is what makes EV_RESIZE fire once per change instead of on
+         * every read timeout from here on. */
+        g_ack_w = g_front->w; g_ack_h = g_front->h;
         frame_invalidate();
         fputs("\x1b[2J\x1b[H", stdout);
         fflush(stdout);
@@ -433,7 +504,31 @@ void frame_present(Screen *s) {
         }
     }
 
-    memcpy(g_front->cells, s->cells, (size_t)s->w * (size_t)s->h * sizeof(Cell));
+    /* Publish the back buffer into the front buffer, clamped to what the front
+     * buffer actually holds.
+     *
+     * s is sized by its owner, independently of g_front: main.c forces 120x40
+     * whenever the console is narrower than MIN_SCREEN_W or shorter than
+     * MIN_SCREEN_H, which is exactly what happens in a split pane. A flat
+     * s->w * s->h memcpy then runs off the end of g_front on the very first
+     * frame - a 50x12 front buffer against a 120x40 back screen overruns by
+     * 84,000 bytes, every frame.
+     *
+     * Two things matter here. The bound is derived from g_front->w/g_front->h
+     * read at this instant, not from a size cached earlier, so the resize above
+     * - or any future one - cannot leave the two out of step. And the copy goes
+     * row by row with each buffer's own stride, because the two widths differ;
+     * copying cw*ch cells linearly would smear row n of s across the wrong rows
+     * of g_front the moment s->w != g_front->w. */
+    {
+        int cw = (s->w < g_front->w) ? s->w : g_front->w;
+        int ch = (s->h < g_front->h) ? s->h : g_front->h;
+        for (int y = 0; y < ch; y++) {
+            memcpy(g_front->cells + (size_t)y * (size_t)g_front->w,
+                   s->cells + (size_t)y * (size_t)s->w,
+                   (size_t)cw * sizeof(Cell));
+        }
+    }
 
     if (dirty) {
         fputs("\x1b[0m", out);

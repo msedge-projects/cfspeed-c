@@ -22,6 +22,54 @@
 #  include <unistd.h>
 #endif
 
+/* ------------------------------------------------------ atomic accessors */
+
+/* The byte counter is a plain `uint64_t` owned by engine.c and shared by up to
+ * six worker threads (write) and the UI thread (read). It was being updated
+ * with a bare `+=`, so concurrent workers lost updates and every reported
+ * figure - Mbps, avg, p95, max, total bytes - was silently undercounted by a
+ * different amount on every run. That is exactly the case where a number
+ * disagrees with an external speed test.
+ *
+ * These use the GCC/clang __atomic builtins rather than <stdatomic.h> _Atomic
+ * objects or the Win32 Interlocked* intrinsics, for two reasons:
+ *
+ *   - The builtins give atomicity on a pointer to an ordinary naturally
+ *     aligned uint64_t. That means engine.h does NOT have to redeclare
+ *     Engine.counter as _Atomic: the type stays `uint64_t` and this file stays
+ *     independent of engine.h's layout, which was the whole point of the
+ *     constraint. _Atomic objects would in fact still work through a
+ *     uint64_t*, but they would force the declaration change.
+ *   - InterlockedExchangeAdd64 needs windows.h included with a sufficiently
+ *     new _WIN32_WINNT, and the Makefile's Windows build defines neither, so
+ *     the intrinsics would need a header-order workaround. The builtins need
+ *     nothing beyond -std=gnu11.
+ *
+ * Relaxed ordering is sufficient and is the cheapest correct choice here: the
+ * counter is a self-contained running total. No other datum is published
+ * through it, so there is nothing for these accesses to be ordered against.
+ * A mutex would also make the counter correct, but this runs in curl's write
+ * callback - tens of thousands of times a second across six threads - so
+ * serialising there would cost more than the measurement itself.
+ *
+ * Alignment: the target is x86-64, where a uint64_t object is always
+ * 8-byte aligned, which is what these builtins require. */
+static inline uint64_t atomic_load_u64(const uint64_t *p) {
+    return __atomic_load_n(p, __ATOMIC_RELAXED);
+}
+
+static inline void atomic_add_u64(uint64_t *p, uint64_t v) {
+    __atomic_fetch_add(p, v, __ATOMIC_RELAXED);
+}
+
+static inline int atomic_load_i(const int *p) {
+    return __atomic_load_n(p, __ATOMIC_RELAXED);
+}
+
+static inline void atomic_store_i(int *p, int v) {
+    __atomic_store_n(p, v, __ATOMIC_RELAXED);
+}
+
 /* --------------------------------------------------------------- helpers */
 
 static uint64_t mono_ms(void) {
@@ -271,11 +319,17 @@ void net_fetch_meta(const char *base_url, Meta *m) {
                 }
             }
             m->edge_ip_count = n;
-#if defined(_WIN32)
-            WSACleanup();
-#else
+            /* Release the resolved addresses, NOT Winsock. net_init() calls
+             * WSAStartup() exactly once and net_shutdown() owns the single
+             * matching WSACleanup(); calling WSACleanup() here dropped the
+             * process-wide Winsock refcount to zero ~100 ms before the first
+             * probe, so every later getaddrinfo() failed with WSANOTINITIALISED
+             * (10093) and net_shutdown() then cleaned up a startup that no
+             * longer existed. libcurl does not call WSAStartup() itself, so
+             * nothing re-balanced it. freeaddrinfo() is declared and works on
+             * mingw-w64 (ws2tcpip.h:233) - it is not platform-specific - and the
+             * addrinfo list was additionally being leaked on Windows. */
             freeaddrinfo(res);
-#endif
         }
         (void)port;
     }
@@ -389,23 +443,45 @@ struct WorkerHandle {
 #else
     pthread_t thread;
 #endif
-    volatile int stop;
+    /* Cross-thread visibility comes from the __atomic builtins on every access,
+     * not from `volatile`. volatile is not a synchronisation primitive: it
+     * constrains the compiler but orders nothing and is not atomic. That
+     * matters for more than tidiness here - it is what lets net_worker_stop()'s
+     * join observe the flag and return, which in turn is what guarantees the
+     * context is dead before it is freed. */
+    int stop;
 };
+
+/* A fixed 1 MiB upload body. Earlier this streamed an endless body and counted
+ * as reqwest pulled chunks from it, which measures bytes handed to the kernel
+ * rather than bytes delivered - it reported over 1 Gbps on a link that sustains
+ * ~130 Mbps. Counting only on a 2xx response is ground truth.
+ *
+ * Per worker, not static. It used to be a function-local `static`, so all six
+ * workers re-initialised the same 1 MiB buffer concurrently while other
+ * workers were POSTing from it - a data race that corrupted the payload
+ * mid-flight and left workers posting bytes belonging to a different request.
+ * A mutex would only serialise the workers; since the body is filled once and
+ * then posted many times, per-worker storage removes the shared state outright
+ * instead of guarding it. */
+#define NET_BODY_BYTES (1024u * 1024u)
 
 typedef struct {
     struct WorkerHandle h;
     char base[256];
     uint64_t duration_ms;
     Worker cfg;
+    unsigned char *body; /* this worker's private upload payload */
 } WorkerCtx;
 
 static size_t progress_cb(char *p, size_t sz, size_t n, void *ud) {
     (void)p;
     Worker *w = (Worker *)ud;
     /* Download progress is real: these bytes are off the socket and on the
-     * wire, so counting here is legitimate and time-accurate. */
+     * wire, so counting here is legitimate and time-accurate. The add is
+     * atomic because several workers share this one counter. */
     if (!w->upload && w->counter)
-        *w->counter += (uint64_t)(sz * n);
+        atomic_add_u64(w->counter, (uint64_t)(sz * n));
     return sz * n;
 }
 
@@ -425,13 +501,9 @@ static void *worker_main(void *arg) {
     const char *base = ctx->base;
     uint64_t deadline = mono_ms() + ctx->duration_ms;
 
-    /* A fixed 1 MiB body. Earlier this streamed an endless body and counted as
-     * reqwest pulled chunks from it, which measures bytes handed to the kernel
-     * rather than bytes delivered - it reported over 1 Gbps on a link that
-     * sustains ~130 Mbps. Counting only on a 2xx response is ground truth. */
-    static unsigned char body[1024 * 1024];
-    for (size_t i = 0; i < sizeof body; i++)
-        body[i] = (unsigned char)(i * 31u + 7u);
+    /* The upload body is allocated and filled by net_worker_start() before this
+     * thread exists, so it is private to this worker with nothing to race. */
+    unsigned char *const body = ctx->body;
 
     CURL *c = curl_easy_init();
     if (!c) {
@@ -445,7 +517,7 @@ static void *worker_main(void *arg) {
 
     int ok_streak = 0;
 
-    while (mono_ms() < deadline && !ctx->h.stop) {
+    while (mono_ms() < deadline && !atomic_load_i(&ctx->h.stop)) {
         char url[512];
         struct curl_slist *hdrs = NULL;
         int ok = 0;
@@ -458,7 +530,7 @@ static void *worker_main(void *arg) {
             curl_easy_setopt(c, CURLOPT_URL, url);
             curl_easy_setopt(c, CURLOPT_POST, 1L);
             curl_easy_setopt(c, CURLOPT_POSTFIELDS, body);
-            curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)sizeof body);
+            curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)NET_BODY_BYTES);
         } else {
             snprintf(url, sizeof url, "%s/__down?bytes=%lu", base, w->chunk);
             curl_easy_setopt(c, CURLOPT_HTTPGET, 1L);
@@ -476,12 +548,14 @@ static void *worker_main(void *arg) {
             fprintf(stderr, "[worker %s] url=%s rc=%d(%s) http=%ld count=%llu chunk=%lu\n",
                     w->upload ? "up" : "down", url, (int)rc,
                     rc == CURLE_OK ? "ok" : curl_easy_strerror(rc), code,
-                    (unsigned long long)(w->counter ? *w->counter : 0), w->chunk);
+                    (unsigned long long)(w->counter ? atomic_load_u64(w->counter) : 0),
+                    w->chunk);
 
         if (w->upload) {
-            /* Only a 2xx means the body actually landed. */
+            /* Only a 2xx means the body actually landed. The add is atomic
+             * because the six workers share one counter. */
             if (rc == CURLE_OK && code >= 200 && code < 300) {
-                if (w->counter) *w->counter += (uint64_t)sizeof body;
+                if (w->counter) atomic_add_u64(w->counter, (uint64_t)NET_BODY_BYTES);
             } else {
                 sleep_ms(rc == CURLE_OK ? 50 : 100);
             }
@@ -521,23 +595,70 @@ WorkerHandle *net_worker_start(const char *base_url, Worker *cfg) {
     snprintf(ctx->base, sizeof ctx->base, "%s", base_url);
     ctx->cfg = *cfg;
     ctx->duration_ms = cfg->duration_ms;
+
+    /* Allocate and fill the body here, on the creating thread, rather than
+     * inside the worker. Doing it before the thread exists is what makes it
+     * private: the worker only ever reads it, so there is no window in which
+     * two workers could be writing the same bytes. */
+    ctx->body = (unsigned char *)malloc(NET_BODY_BYTES);
+    if (!ctx->body) { free(ctx); return NULL; }
+    for (size_t i = 0; i < NET_BODY_BYTES; i++)
+        ctx->body[i] = (unsigned char)(i * 31u + 7u);
+
 #if defined(_WIN32)
     ctx->h.thread = CreateThread(NULL, 0, worker_main, ctx, 0, NULL);
-    if (!ctx->h.thread) { free(ctx); return NULL; }
+    if (!ctx->h.thread) { free(ctx->body); free(ctx); return NULL; }
 #else
-    if (pthread_create(&ctx->h.thread, NULL, worker_main, ctx) != 0) { free(ctx); return NULL; }
+    if (pthread_create(&ctx->h.thread, NULL, worker_main, ctx) != 0) {
+        free(ctx->body); free(ctx); return NULL;
+    }
 #endif
     return &ctx->h;
 }
 
+/* Upper bound on how long a worker can stay alive after stop is requested.
+ * The worker leaves its loop the moment it sees the flag or passes its
+ * deadline, so the only thing that can outlast the flag is a single in-flight
+ * request, and curl_base() caps those at CURLOPT_TIMEOUT (30 s). 35 s leaves
+ * headroom over that cap. */
+#define NET_JOIN_MS 35000
+
 void net_worker_stop(WorkerHandle *h) {
     if (!h) return;
-    h->stop = 1;
+    /* WorkerHandle is the first member of WorkerCtx, so the caller's handle
+     * and the whole context share an address; recovering it this way is what
+     * lets the body be released alongside the context below. */
+    WorkerCtx *ctx = (WorkerCtx *)h;
+    atomic_store_i(&ctx->h.stop, 1);
 #if defined(_WIN32)
-    WaitForSingleObject(h->thread, 3000);
-    CloseHandle(h->thread);
+    /* This used to wait 3 s, ignore the result, and free the context
+     * unconditionally. curl_base() sets CURLOPT_TIMEOUT to 30 s, so one stalled
+     * request outlives that wait by an order of magnitude: the thread returned
+     * into a freed ctx, re-read ctx->base and wrote through *w->counter - a
+     * use-after-free on both a read and a write, and a corrupted byte total on
+     * the way out.
+     *
+     * So the thread is waited for properly, and the context is released ONLY
+     * once the wait confirms the thread really exited. On the timeout path the
+     * context and its body are deliberately leaked: a rare leak at exit is
+     * vastly preferable to freeing memory a live thread is still reading. The
+     * invariant this guarantees is that no path frees a context a running
+     * worker can still reach. */
+    DWORD wr = WaitForSingleObject(ctx->h.thread, NET_JOIN_MS);
+    /* Closing the handle does not kill or invalidate the thread - the kernel
+     * keeps the thread object alive until it exits - so this is safe even on
+     * the timeout path, and it reclaims the handle rather than leaking it. */
+    CloseHandle(ctx->h.thread);
+    if (wr != WAIT_OBJECT_0) {
+        if (dbg())
+            fprintf(stderr, "[worker] join timed out after %d ms, leaking context\n", NET_JOIN_MS);
+        return; /* deliberate leak - see above */
+    }
 #else
-    pthread_join(h->thread, NULL);
+    /* pthread_join has no timeout, so it already provides the same guarantee:
+     * it returns only once the thread has terminated. */
+    pthread_join(ctx->h.thread, NULL);
 #endif
-    free(h); /* WorkerHandle is the first member of WorkerCtx */
+    free(ctx->body);
+    free(ctx);
 }
