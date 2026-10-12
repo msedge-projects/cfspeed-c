@@ -9,6 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "env_size.h"
+
 #include "engine.h"
 #include "term.h"
 #include "ui.h"
@@ -42,7 +44,13 @@ int main(int argc, char **argv) {
     }
 
     int w = 0, h = 0;
-    term_size(&w, &h);
+    /* Without a console - a pipe, a file, a CI log - there is no size to ask
+     * for, and falling back to zero would clamp the screen to a single cell. */
+    if (term_size(&w, &h) != 0 || w < MIN_SCREEN_W || h < MIN_SCREEN_H) {
+        env_size(&w, &h);
+        if (w < MIN_SCREEN_W) w = 120;
+        if (h < MIN_SCREEN_H) h = 40;
+    }
     Screen *scr = screen_create(w, h);
     Engine *e = engine_new(BASE_URL, mode);
     if (!scr || !e) {
@@ -64,7 +72,7 @@ int main(int argc, char **argv) {
 
         Event ev = term_poll();
         if (ev.type == EV_RESIZE) {
-            term_size(&w, &h);
+            if (term_size(&w, &h) != 0) continue;
             Screen *ns = screen_create(w, h);
             if (ns) {
                 screen_free(scr);

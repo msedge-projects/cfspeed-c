@@ -23,7 +23,7 @@ all: $(BIN)
 $(BIN): $(OBJ)
 	$(CC) $(CFLAGS) -o $@ $(OBJ) $(LDFLAGS) $(LDLIBS)
 
-%.o: %.c src/term.h src/net.h src/engine.h src/ui.h src/theme.h
+%.o: %.c src/term.h src/net.h src/engine.h src/ui.h src/theme.h src/env_size.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:

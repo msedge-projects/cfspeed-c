@@ -375,8 +375,10 @@ void frame_invalidate(void) {
 }
 
 void frame_present(Screen *s) {
-    int w, h;
-    if (term_size(&w, &h) == 0 && (w != g_front->w || h != g_front->h)) {
+    int w = 0, h = 0;
+    /* A failed query must not be treated as a resize to 0x0. */
+    if (term_size(&w, &h) != 0) w = g_front->w, h = g_front->h;
+    if ((w != g_front->w || h != g_front->h)) {
         /* Resize: adopt the new geometry and force a full repaint. */
         Screen *nf = screen_create(w, h);
         if (!nf) return;
