@@ -75,39 +75,47 @@ jobs:
           mkdir -p stage
           cp cfspeed.exe stage/
 
-          queue=(cfspeed.exe)
-          seen="|"
-          while [ ${#queue[@]} -gt 0 ]; do
-            cur="${queue[0]}"
-            queue=("${queue[@]:1}")
-            # Process substitution, not a pipe: `ldd | while read` runs the loop
-            # in a subshell, so every queue and seen update is discarded when it
-            # exits and the walk silently collects one level and no more.
-            while read -r line; do
+          # A space-separated string, not an array: it survives the MSYS2
+          # wrapper intact. The loop body reads from a FILE, never a pipe -
+          # `ldd | while read` runs in a subshell where every update to the
+          # queue and the seen-set is discarded on exit, so the walk silently
+          # collects exactly one level and stops.
+          queue="cfspeed.exe"
+          seen=" "
+          while [ -n "$queue" ]; do
+            cur="${queue%% *}"
+            if [ "$cur" = "$queue" ]; then queue=""; else queue="${queue#* }"; fi
+            ldd "$cur" > ldd.out 2>/dev/null || true
+            while IFS= read -r line; do
               case "$line" in
-                *"=>"*)
-                  # Take the path, not the name: the name appears on both
-                  # sides of "=>" and grep -o returns the leftmost.
+                *"=> "*)
+                  # Take the path, not the name: the name appears on both sides
+                  # of "=>" and grep -o returns the leftmost match.
                   dep="${line##*=> }"
                   case "$dep" in
                     /c/Windows/*|'') continue ;;
                   esac
                   [ -f "$dep" ] || continue
-                  dname="$(basename "$dep")"
-                  case "$seen" in *"|$dname|"*) continue ;; esac
-                  seen="$seen$dname|"
-                  cp -n "$dep" stage/ 2>/dev/null || true
-                  queue+=("$dep")
+                  d="$(basename "$dep")"
+                  case "$seen" in *" $d "*) continue ;; esac
+                  seen="$seen$d "
+                  cp -f "$dep" stage/ 2>/dev/null || true
+                  queue="$queue $dep"
                   ;;
               esac
-            done < <(ldd "$cur" 2>/dev/null)
+            done < ldd.out
           done
 
+          if [ ! -f cfspeed-ca.pem ]; then
+            echo "::error::CA bundle was not fetched; the binary cannot verify TLS without it"
+            exit 1
+          fi
           cp cfspeed-ca.pem stage/
 
           # Fail loudly here rather than shipping a package that cannot start.
           n=$(ls stage/*.dll 2>/dev/null | wc -l)
-          echo "collected $n runtime DLLs"
+          echo "collected $n runtime DLLs:"
+          ls stage
           if [ ! -f stage/libcurl-4.dll ]; then
             echo "::error::libcurl-4.dll missing from the package"
             exit 1
