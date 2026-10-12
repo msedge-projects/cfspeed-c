@@ -69,52 +69,11 @@ jobs:
         shell: msys2 {0}
         run: |
           export PATH="/mingw64/bin:$PATH"
-          mkdir -p stage
-          cp cfspeed.exe stage/
-
-          # ldd reports only DIRECT imports, so one pass finds libcurl and
-          # nothing beneath it. The tree must be walked to a fixed point.
-          #
-          # Each round rescans everything collected so far and copies what it
-          # finds, so no state is carried between rounds. An earlier version used
-          # `ldd | while read` and queued its finds in a shell variable: that loop
-          # body runs in a subshell, every update died with it, and the walk
-          # silently collected exactly one level. A bounded number of independent
-          # rounds cannot fail that way.
-          for round in 1 2 3 4 5 6; do
-            : > found.txt
-            for f in stage/*.dll stage/*.exe; do
-              [ -f "$f" ] || continue
-              # Only /mingw64 paths are shipped. Anything under /c/Windows is a
-              # system DLL that is already on the user's machine.
-              ldd "$f" 2>/dev/null \
-                | sed -n 's|.*=> */mingw64/\([^ ]*\.dll\).*|\1|p' \
-                | sed 's|^|/mingw64/|' >> found.txt
-            done
-            [ -s found.txt ] || break
-            while read -r dep; do
-              cp -f "/mingw64/$dep" stage/ 2>/dev/null || true
-            done < found.txt
-          done
-
-          if [ ! -f cfspeed-ca.pem ]; then
-            echo "::error::CA bundle was not fetched; the binary cannot verify TLS without it"
-            exit 1
-          fi
-          cp cfspeed-ca.pem stage/
-
-          # Fail loudly here rather than shipping a package that cannot start.
-          n=$(ls stage/*.dll 2>/dev/null | wc -l)
-          echo "collected $n runtime DLLs:"
-          ls stage
-          if [ ! -f stage/libcurl-4.dll ]; then
-            echo "::error::libcurl-4.dll missing from the package"
-            exit 1
-          fi
-          if [ "$n" -lt 10 ]; then
-            echo "::error::only $n DLLs collected; the dependency walk is probably shallow again"
-            exit 1
-          fi
+          # The walk lives in a script, not inline here: it is the one piece of
+          # this workflow with real logic in it, and inline YAML through the
+          # MSYS2 wrapper failed in ways that were painful to diagnose. A
+          # versioned script can be run and tested on its own.
+          bash scripts/collect-dlls.sh
 
       - name: Package
         shell: bash
