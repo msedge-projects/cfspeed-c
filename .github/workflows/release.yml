@@ -46,6 +46,15 @@ jobs:
         if: matrix.os == 'macos-latest'
         run: make CC=clang && strip cfspeed || true
 
+      - name: Build (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: msys2 {0}
+        run: |
+          export PATH="/mingw64/bin:$PATH"
+          make
+          strip cfspeed.exe || true
+          test -f cfspeed.exe
+
       # Windows libcurl is GnuTLS-backed, and GnuTLS reads its trust list from
       # a file. Windows keeps its trust store in a registry database only
       # schannel can use, so without this file every request fails certificate
@@ -71,7 +80,10 @@ jobs:
           while [ ${#queue[@]} -gt 0 ]; do
             cur="${queue[0]}"
             queue=("${queue[@]:1}")
-            ldd "$cur" 2>/dev/null | while read -r line; do
+            # Process substitution, not a pipe: `ldd | while read` runs the loop
+            # in a subshell, so every queue and seen update is discarded when it
+            # exits and the walk silently collects one level and no more.
+            while read -r line; do
               case "$line" in
                 *"=>"*)
                   # Take the path, not the name: the name appears on both
@@ -88,7 +100,7 @@ jobs:
                   queue+=("$dep")
                   ;;
               esac
-            done
+            done < <(ldd "$cur" 2>/dev/null)
           done
 
           cp cfspeed-ca.pem stage/
