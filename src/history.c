@@ -656,6 +656,20 @@ static const char *next_record(const char *p, const char *end) {
     return NULL;
 }
 
+/* The start of record number `want`, counting from zero, or NULL when the file
+ * does not hold that many. */
+static const char *record_at(const char *buf, const char *end, int want) {
+    const char *p = buf;
+    for (int i = 0; i < want && p < end; i++) {
+        const char *start = next_record(p, end);
+        if (!start) return NULL;
+        const char *oe = skip_container(start, end);
+        if (oe <= start) return NULL;
+        p = oe;
+    }
+    return p;
+}
+
 /* ------------------------------------------------------------------ load */
 
 void history_load(History *h) {
@@ -687,18 +701,30 @@ void history_load(History *h) {
      * run, and a hand-edited file could carry thousands of them. Both passes
      * walk records the same way, so what is counted and what is kept agree. */
     int total = 0;
-    const char *keep = NULL;
     for (const char *q = buf; q < end;) {
         const char *start = next_record(q, end);
         if (!start) break;
         const char *oe = skip_container(start, end);
         if (oe <= start) break;
-        if (total >= MAX_RUNS && !keep) keep = start;
         total++;
         q = oe;
     }
 
-    for (const char *p = keep ? keep : buf; p < end && h->count < MAX_RUNS;) {
+    /* The file is oldest first, so the survivors are the LAST MAX_RUNS records
+     * and the window opens `total - MAX_RUNS` records in: an overfull file
+     * loses its head, never its tail. That is the whole difference between
+     * keeping the newest MAX_RUNS and keeping whatever is left once the oldest
+     * MAX_RUNS have been thrown away - the old code did the second, and a
+     * 250-record file came back as the last 50 of the first 200.
+     *
+     * Which record the window opens on is not known until the file has been
+     * counted, so it is found by walking to it rather than remembered on the
+     * way past. That second walk only chases record delimiters; the
+     * alternative, a table of every boundary seen during the count, would be
+     * sized by a file that may hold thousands of records. */
+    int skip = (total > MAX_RUNS) ? total - MAX_RUNS : 0;
+    const char *first = record_at(buf, end, skip);
+    for (const char *p = first ? first : buf; p < end && h->count < MAX_RUNS;) {
         const char *start = next_record(p, end);
         if (!start) break;
         const char *oe = skip_container(start, end);

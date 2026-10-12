@@ -514,6 +514,48 @@ static void guard_or_fail(GScreen *g, const char *what, int w, int h)
 
 /* ================================================== 1. distinguishable ==== */
 
+/* Reports a collision between two rendered screens and fails the test.
+ *
+ * A collision is the exact bug class this file targets: a tab that is wired,
+ * hotkeyed and clickable, drawing somebody else's content. On a collision the
+ * useful thing to print is evidence - the first line on which the two differ,
+ * or, when they never differ, the first line with any ink on it, because that
+ * is what the reader has to look at to see which view is in both places.
+ */
+static void report_collision(const char *label, const char *na,
+                             const char *txt_a, const char *nb,
+                             const char *txt_b)
+{
+    int line = 1, found = 0;
+    char la[TEXT_CAP], lb[TEXT_CAP];
+
+    while (row_text(txt_a, line - 1, la, sizeof la)) {
+        if (!row_text(txt_b, line - 1, lb, sizeof lb)) break;
+        if (strcmp(la, lb) != 0) { found = 1; break; }
+        line++;
+    }
+    if (found) {
+        FAIL_MSG("%s: %s and %s COLLIDE; first differing line is line %d:\n"
+                 "      %-58s | %s", label, na, nb, line, la, lb);
+        return;
+    }
+
+    /* Identical throughout. Walk to the first row with ink; if the whole
+     * screen is blank there is nothing to quote and saying so is the point. */
+    line = 1;
+    while (row_text(txt_a, line - 1, la, sizeof la)) {
+        if (la[0] != '\0') break;
+        line++;
+    }
+    if (la[0] == '\0')
+        FAIL_MSG("%s: %s and %s are byte-identical AND both blank - neither "
+                 "view drew anything", label, na, nb);
+    else
+        FAIL_MSG("%s: %s and %s are byte-identical over the whole screen; "
+                 "first row with ink is line %d:\n      %s",
+                 label, na, nb, line, la);
+}
+
 TEST(views_render_distinct_from_each_other)
 {
     static const int SIZES[][2] = { {120, 40}, {100, 30}, {200, 60} };
@@ -540,29 +582,12 @@ TEST(views_render_distinct_from_each_other)
             for (int b = a + 1; b < 4; b++) {
                 if (!text[a] || !text[b]) continue;
                 if (strcmp(text[a], text[b]) != 0) continue;
-
-                /* A collision is the exact bug class this file targets: the
-                 * dispatcher wired a tab and the tab drew somebody else's
-                 * content. Report where the two texts first diverge - or, when
-                 * they never do, the first line they agree on, which is the
-                 * line a reader needs to see to know which view is being
-                 * rendered in both places. */
-                int line = 1, found = 0;
-                char la[TEXT_CAP], lb[TEXT_CAP];
-                while (row_text(text[a], line - 1, la, sizeof la)) {
-                    if (!row_text(text[b], line - 1, lb, sizeof lb)) break;
-                    if (strcmp(la, lb) != 0) { found = 1; break; }
-                    line++;
+                {
+                    char label[32];
+                    snprintf(label, sizeof label, "%dx%d", w, hh);
+                    report_collision(label, VIEWS[a].name, text[a],
+                                     VIEWS[b].name, text[b]);
                 }
-                if (found)
-                    FAIL_MSG("%dx%d: %s and %s COLLIDE; first differing line "
-                             "is line %d:\n      %s | %s",
-                             w, hh, VIEWS[a].name, VIEWS[b].name,
-                             line, la, lb);
-                else
-                    FAIL_MSG("%dx%d: %s and %s are byte-identical; first "
-                             "shared line %d:\n      %s",
-                             w, hh, VIEWS[a].name, VIEWS[b].name, line, la);
             }
         }
 
@@ -769,6 +794,15 @@ TEST(history_loss_column_falls_back_to_dash_only_with_no_probes)
     h->runs[0].idle.med = 0.0;
     h->runs[1].idle.samples = 1;
     h->runs[1].idle.loss = 4.0;
+    /* THE case that separates "no probes" from "no loss". Probed 40 times and
+     * lost nothing, which is a clean link and not a test that never ran. This
+     * is the row the shipped bug got wrong: keying the column off
+     * `idle.loss > 0` prints "-" here, which reads as "never probed" and is
+     * indistinguishable from the run above it. Keying it off `idle.samples`
+     * prints "0.00%", which is the measured truth. */
+    h->runs[2].idle.samples = 40;
+    h->runs[2].idle.loss = 0.0;
+    h->runs[2].idle.med = 0.0;
 
     ASSERT(gscreen_open(&g, 120, 40));
     view_history(&g.s, &e, h, 0);
@@ -783,6 +817,14 @@ TEST(history_loss_column_falls_back_to_dash_only_with_no_probes)
     ASSERT(row_text(rows, 4, line, sizeof line));
     slice(line, H_LOSS_X, H_LOSS_W, col, sizeof col);
     ASSERT_STR(col, "4.00%");
+
+    ASSERT(row_text(rows, 5, line, sizeof line));
+    slice(line, H_LOSS_X, H_LOSS_W, col, sizeof col);
+    if (strcmp(col, "-") == 0)
+        FAIL_MSG("a run with idle.samples=40 and idle.loss=0.0 shows \"-\" in "
+                 "the LOSS column; that reads as \"never probed\". Expected "
+                 "0.00%%. Row reads \"%s\"", line);
+    ASSERT_STR(col, "0.00%");
     free(h);
 }
 
@@ -1239,24 +1281,12 @@ TEST(dispatcher_routes_each_tab_to_a_distinct_view)
      * it is gone. */
     for (int a = 0; a < 5; a++) {
         for (int b = a + 1; b < 5; b++) {
-            int line = 1, found = 0;
-            char la[TEXT_CAP], lb[TEXT_CAP];
+            char label[32];
             if (!text[a] || !text[b]) continue;
             if (strcmp(text[a], text[b]) != 0) continue;
-
-            while (row_text(text[a], line - 1, la, sizeof la)) {
-                if (!row_text(text[b], line - 1, lb, sizeof lb)) break;
-                if (strcmp(la, lb) != 0) { found = 1; break; }
-                line++;
-            }
-            if (found)
-                FAIL_MSG("tab %d (%s) and tab %d (%s) render the same view; "
-                         "first differing line is %d:\n      %s | %s",
-                         a, TAB_TITLE[a], b, TAB_TITLE[b], line, la, lb);
-            else
-                FAIL_MSG("tab %d (%s) and tab %d (%s) are byte-identical; "
-                         "first shared line %d:\n      %s",
-                         a, TAB_TITLE[a], b, TAB_TITLE[b], line, la);
+            snprintf(label, sizeof label, "ui_draw %dx%d", W, H);
+            report_collision(label, TAB_TITLE[a], text[a],
+                             TAB_TITLE[b], text[b]);
         }
     }
 

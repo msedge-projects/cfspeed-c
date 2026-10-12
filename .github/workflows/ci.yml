@@ -103,6 +103,16 @@ jobs:
       # cfspeed-ca.pem into the workspace root, and the artifact glob is
       # `cfspeed*` - running the gate first would silently change what gets
       # uploaded.
+      #
+      # KNOWN FLAKINESS, stated rather than papered over: Cloudflare rate-limits
+      # repeated speed tests from one address, and cfspeed detects that case and
+      # exits non-zero with "The test transferred no data - Cloudflare refused
+      # every request". A runner that trips it goes red here. That is the gate
+      # working, not the gate misfiring - a throttled run really did measure
+      # nothing - so there is deliberately no retry and no softening. Fresh
+      # runners get fresh addresses and this has not reproduced otherwise; if it
+      # starts reproducing, the fix belongs in how often we test, not in the
+      # assertions.
 
       # No cfspeed-ca.pem on Linux or macOS, and that is the code's own view,
       # not an assumption: use_ca_bundle() in src/net.c only probes for the
@@ -129,6 +139,13 @@ jobs:
       # (fetch-ca.sh over fetch-ca.ps1 here purely because this step already
       # runs inside the MSYS2 shell - same contract, same validation, no
       # PowerShell-through-MSYS2 path translation.)
+      #
+      # Honest caveat: this may well be belt-and-braces on the runner itself.
+      # MSYS2 ships /mingw64/etc/ssl/certs/ca-bundle.crt, and GnuTLS falls back
+      # to it, so a runner with the toolchain installed can verify TLS without
+      # the bundle. It is fetched anyway because the regression this gate exists
+      # for happens on machines that do NOT have an MSYS2 tree, and exercising
+      # the same trust path the release ships is the point.
       #
       # No DLL staging is needed: /mingw64/bin is already on PATH inside this
       # shell, so libcurl and its transitive GnuTLS/nettle chain resolve.

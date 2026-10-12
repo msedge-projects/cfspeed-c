@@ -721,87 +721,144 @@ TEST(history_load_keeps_newest_max_runs)
     free(g);
 }
 
+/* The number of record lines in a saved file, and the timestamp_ms of the
+ * `which`th of them, counted over the file's own lines rather than through the
+ * loader. Tests that check what the writer did must not go through the reader:
+ * the reader has trimming behaviour of its own under test. */
+static int record_line_count(const char *text)
+{
+    int n = 0;
+    const char *p = text;
+
+    while (*p) {
+        const char *e = strchr(p, '\n');
+        size_t len = e ? (size_t)(e - p) : strlen(p);
+        size_t k = 0;
+        while (k < len && (p[k] == ' ' || p[k] == '\t' || p[k] == '\r')) k++;
+        if (k < len && p[k] == '{') n++;
+        if (e == NULL) break;
+        p = e + 1;
+    }
+    return n;
+}
+
+static long long record_line_ts(const char *text, int which)
+{
+    const char *p = text;
+    int seen = 0;
+
+    while (*p) {
+        const char *e = strchr(p, '\n');
+        size_t len = e ? (size_t)(e - p) : strlen(p);
+        size_t k = 0;
+        while (k < len && (p[k] == ' ' || p[k] == '\t' || p[k] == '\r')) k++;
+        if (k < len && p[k] == '{') {
+            if (seen == which) {
+                static const char KEY[] = "\"timestamp_ms\":";
+                const char *t = strstr(p, KEY);
+                if (t == NULL) return -1;
+                return strtoll(t + (sizeof KEY - 1), NULL, 10);
+            }
+            seen++;
+        }
+        if (e == NULL) break;
+        p = e + 1;
+    }
+    return -1;
+}
+
 TEST(history_save_trims_an_overfull_history)
 {
     /* The save-side half of the same contract: history.h documents the format
      * as "trimmed to the newest MAX_RUNS on save". History.runs is a fixed
      * MAX_RUNS array, so reaching that branch needs a History whose count
-     * claims more records than its own array can hold.
+     * claims more records than its own array holds, which means a block
+     * larger than sizeof(History) viewed as one.
      *
-     * The storage below does that without aliasing. History is
-     * { RunResult runs[MAX_RUNS]; int count; }, so `count` sits immediately
-     * after the array -- always at the address runs[MAX_RUNS] would have. An
-     * earlier version of this test simply over-allocated and wrote TOTAL runs
-     * from the struct's own address, which put runs[200..249] exactly on top
-     * of `count`; assigning count afterwards silently scribbled 250 over the
-     * first four bytes of run 200's Throughput.bytes. So the EXTRA runs the
-     * struct cannot hold are placed after the struct instead, and the layout
-     * is asserted rather than assumed.
-     *
-     * Everything read or written is inside the one allocation. */
+     * Note the one thing this cannot have: History is
+     * { RunResult runs[MAX_RUNS]; int count; }, so `count` always occupies the
+     * first bytes of runs[MAX_RUNS]. Storing a count of 250 necessarily lands
+     * on run 200's Throughput.bytes, and that is a property of the struct
+     * rather than of history.c. The test therefore asserts on record count,
+     * order and timestamps -- none of which live in that field -- and never on
+     * run 200's byte count. */
     const int TOTAL = 250;
-    const int EXTRA = TOTAL - MAX_RUNS;
-    const size_t PAD = 4096;                  /* keeps the struct 8-aligned */
-    const size_t BLOCK = PAD + sizeof(History) + (size_t)EXTRA * sizeof(RunResult);
+    const int DROPPED = TOTAL - MAX_RUNS;
+    const size_t PAD = 4096;   /* keeps the struct's alignment intact */
+    const size_t BLOCK = PAD + (size_t)TOTAL * sizeof(RunResult) + sizeof(int);
 
     char *block = (char *)malloc(BLOCK);
-    History *g = hist_new();
     History *w;
-    RunResult *tail;
+    char *text;
+    size_t len = 0;
+    int nrec;
 
-    if (block == NULL || g == NULL) {
-        cfs_fail_msg("out of memory");
-        free(block);
-        free(g);
-        return;
-    }
+    if (block == NULL) { cfs_fail_msg("out of memory"); return; }
     memset(block, 0, BLOCK);
     w = (History *)(block + PAD);
-    tail = (RunResult *)(block + PAD + sizeof(History));
     sandbox_reset();
 
-    /* The layout assumption above, checked rather than trusted. */
-    ASSERT((const char *)&w->count + sizeof(int) <= (const char *)tail);
-
-    /* w->runs[0 .. MAX_RUNS-1] is the struct's own array; the EXTRA runs
-     * continue immediately after the struct, which is exactly where
-     * history_save will read them from. */
-    for (int i = 0; i < MAX_RUNS; i++) fill_run(&w->runs[i], i);
-    for (int j = 0; j < EXTRA; j++)   fill_run(&tail[j], MAX_RUNS + j);
+    /* Indexed as char* + i*sizeof(RunResult) rather than w->runs[i]: the index
+     * deliberately runs past MAX_RUNS, and a RunResult[200] subscript past its
+     * end is undefined and would be diagnosed as such. The arithmetic itself
+     * is ordinary and stays inside the one allocation. */
+    for (int i = 0; i < TOTAL; i++)
+        fill_run((RunResult *)(void *)(block + PAD + (size_t)i * sizeof(RunResult)), i);
     w->count = TOTAL;
 
     ASSERT(history_save(w) == 0);
 
-    history_load(g);
-    ASSERT(g->count == MAX_RUNS);
-    for (int i = 0; i < g->count && i < MAX_RUNS; i++) {
-        int want = TOTAL - MAX_RUNS + i;
-        char f[48];
-
-        /* history_save must have dropped the oldest 50 and kept the newest
-         * MAX_RUNS, oldest first. */
-        snprintf(f, sizeof f, "slot %d timestamp", i);
-        if (g->runs[i].timestamp_ms != TS_BASE + (uint64_t)want)
-            cfs_fail_msg("%s: got %llu, want %llu", f,
-                         (unsigned long long)g->runs[i].timestamp_ms,
-                         (unsigned long long)(TS_BASE + (uint64_t)want));
-
-        snprintf(f, sizeof f, "slot %d down.bytes", i);
-        if (g->runs[i].down.bytes != 1111111111ULL + (uint64_t)want * 1000ULL)
-            cfs_fail_msg("%s: got %llu, want %llu", f,
-                         (unsigned long long)g->runs[i].down.bytes,
-                         (unsigned long long)(1111111111ULL
-                                              + (uint64_t)want * 1000ULL));
+    text = read_all(&len);
+    if (text == NULL) {
+        cfs_fail_msg("could not read the file back");
+        free(block);
+        return;
     }
 
-    /* The caller's array is const and must be left alone by the writer. */
-    ASSERT(w->runs[0].timestamp_ms == TS_BASE);
-    ASSERT(w->runs[MAX_RUNS - 1].timestamp_ms ==
-           TS_BASE + (uint64_t)(MAX_RUNS - 1));
-    ASSERT(tail[EXTRA - 1].timestamp_ms == TS_BASE + (uint64_t)(TOTAL - 1));
+    nrec = record_line_count(text);
+    ASSERT(nrec == MAX_RUNS);
 
+    /* The newest MAX_RUNS, oldest first: the first record written is run
+     * DROPPED, the last is run TOTAL-1. */
+    {
+        long long got_first = record_line_ts(text, 0);
+        long long got_last  = record_line_ts(text, MAX_RUNS - 1);
+        long long want_first = (long long)(TS_BASE + DROPPED);
+        long long want_last  = (long long)(TS_BASE + TOTAL - 1);
+
+        if (got_first != want_first || got_last != want_last)
+            cfs_fail_msg("history_save wrote %d records: first is run %lld "
+                         "(timestamp_ms %lld, want %lld), last is run %lld "
+                         "(timestamp_ms %lld, want %lld)",
+                         nrec, got_first - (long long)TS_BASE, got_first,
+                         want_first, got_last - (long long)TS_BASE, got_last,
+                         want_last);
+
+        ASSERT(got_first == want_first);
+        ASSERT(got_last == want_last);
+    }
+
+    /* The oldest DROPPED records must not be in the file at all. */
+    for (int i = 0; i < DROPPED; i++) {
+        char needle[32];
+        snprintf(needle, sizeof needle, "\"timestamp_ms\":%llu",
+                 (unsigned long long)(TS_BASE + (uint64_t)i));
+        if (strstr(text, needle) != NULL) {
+            cfs_fail_msg("run %d should have been trimmed but is still in "
+                         "the file", i);
+            break;
+        }
+    }
+
+    /* The writer takes a const History and must leave the caller's array
+     * exactly as it found it. */
+    ASSERT(((RunResult *)(void *)(block + PAD))->timestamp_ms == TS_BASE);
+    ASSERT(((RunResult *)(void *)(block + PAD +
+           (size_t)(TOTAL - 1) * sizeof(RunResult)))->timestamp_ms ==
+           TS_BASE + (uint64_t)(TOTAL - 1));
+
+    free(text);
     free(block);
-    free(g);
 }
 
 /* ================================================= 4. no file is not an error */

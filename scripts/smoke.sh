@@ -50,7 +50,46 @@ pick_python() {
     return 1
 }
 
-py="$(pick_python)" || fail 'neither python3 nor python is available to parse the JSON output'
+py="$(pick_python)" || py=""
+
+# --- fall back to PowerShell ----------------------------------------------------
+#
+# The MSYS2 shell the Windows runner uses has no python on its PATH, and with no
+# fallback the gate fails for a reason that has nothing to do with the binary.
+# PowerShell's ConvertFrom-Json is a real parser and is always present there, so
+# the gate still measures the one thing it exists to measure.
+if [ -z "$py" ]; then
+    for sh in pwsh powershell; do
+        if command -v "$sh" >/dev/null 2>&1; then ps_json="$sh"; break; fi
+    done
+
+    if [ -n "${ps_json:-}" ]; then
+        log "smoke: no python; parsing with $ps_json ConvertFrom-Json"
+        stdout_file="$(mktemp "${TMPDIR:-/tmp}/cfspeed-smoke-out.XXXXXX")"
+        trap 'rm -f "$stdout_file"' EXIT HUP INT TERM
+        "$bin" --json >"$stdout_file" 2>/dev/null \
+            || fail "the binary exited non-zero"
+        "$ps_json" -NoProfile -Command '
+            $ErrorActionPreference = "Stop"
+            $raw = [Console]::In.ReadToEnd()
+            try { $j = $raw | ConvertFrom-Json }
+            catch { [Console]::Error.WriteLine("output is not valid JSON: " + $_); exit 1 }
+            $bad = @()
+            if (-not $j.download) { $bad += "no download object" }
+            elseif ([double]$j.download.avg -le 0) { $bad += "download.avg is " + $j.download.avg + ", expected > 0" }
+            if (-not $j.download.bytes -or [double]$j.download.bytes -le 0) { $bad += "download.bytes missing or 0" }
+            if (-not $j.meta) { $bad += "no meta object" }
+            elseif (-not $j.meta.colo) { $bad += "meta.colo is empty" }
+            if ($bad.Count) { $bad | ForEach-Object { [Console]::Error.WriteLine($_) }; exit 1 }
+            [Console]::Out.WriteLine("smoke: OK  down={0:N1} Mbps  bytes={1}  colo={2}" -f `
+                [double]$j.download.avg, [int64]$j.download.bytes, $j.meta.colo)
+        ' <"$stdout_file" || fail "the run produced no usable measurement"
+        log "smoke: PASS"
+        exit 0
+    fi
+
+    fail 'neither python3 nor python nor PowerShell is available to parse the JSON output'
+fi
 
 # --- run ----------------------------------------------------------------------
 
@@ -164,7 +203,7 @@ if doc.get("error"):
     sys.stderr.write("smoke: note: the document carries an error field: %r\n" % (doc["error"],))
 
 sys.stdout.write(
-    "smoke: ok - valid JSON object, download.avg=%.2f B/s, "
+    "smoke: ok - valid JSON object, download.avg=%.2f Mbps, "
     "download.bytes=%d, colo=%s\n" % (avg, nbytes, colo)
 )
 PY
