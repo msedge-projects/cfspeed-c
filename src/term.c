@@ -27,6 +27,8 @@ static DWORD  g_old_out = 0;
 #else
 static struct termios g_old_term;
 #endif
+static int g_in_mode_changed = 0;
+static int g_out_mode_changed = 0;
 
 /* ------------------------------------------------------------------ timing */
 
@@ -87,25 +89,29 @@ int term_init(void) {
 #if defined(_WIN32)
     g_in = GetStdHandle(STD_INPUT_HANDLE);
     HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (!GetConsoleMode(g_in, &g_old_in) || !GetConsoleMode(out, &g_old_out)) return -1;
+    /* Output may not be a console at all - a pipe or a file still renders
+     * correctly, it just cannot be put into raw mode. Only the input side is
+     * required, and failing it outright would make the app unusable when
+     * launched from a script. */
+    if (GetConsoleMode(out, &g_old_out))
+        g_out_mode_changed =
+            SetConsoleMode(out, g_old_out | ENABLE_VIRTUAL_TERMINAL_PROCESSING) ? 1 : 0;
 
-    /* ENABLE_VIRTUAL_TERMINAL_INPUT is what makes Windows emit real ANSI key
-     * sequences, so the same parser works on all three platforms. */
-    DWORD in_mode = g_old_in;
-    in_mode &= ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT);
-    in_mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
-    if (!SetConsoleMode(g_in, in_mode)) return -1;
-
-    DWORD out_mode = g_old_out | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
-    SetConsoleMode(out, out_mode);
+    if (GetConsoleMode(g_in, &g_old_in)) {
+        DWORD in_mode = g_old_in;
+        in_mode &= ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT);
+        in_mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
+        g_in_mode_changed = SetConsoleMode(g_in, in_mode) ? 1 : 0;
+    }
 #else
-    if (tcgetattr(STDIN_FILENO, &g_old_term) != 0) return -1;
-    struct termios raw = g_old_term;
-    raw.c_lflag &= (tcflag_t)~(ECHO | ICANON | ISIG | IEXTEN);
-    raw.c_iflag &= (tcflag_t)~(IXON | ICRNL | BRKINT | INPCK | ISTRIP);
-    raw.c_cc[VMIN] = 0;
-    raw.c_cc[VTIME] = 1; /* 100ms read timeout, so poll() can return */
-    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) != 0) return -1;
+    if (tcgetattr(STDIN_FILENO, &g_old_term) == 0) {
+        struct termios raw = g_old_term;
+        raw.c_lflag &= (tcflag_t)~(ECHO | ICANON | ISIG | IEXTEN);
+        raw.c_iflag &= (tcflag_t)~(IXON | ICRNL | BRKINT | INPCK | ISTRIP);
+        raw.c_cc[VMIN] = 0;
+        raw.c_cc[VTIME] = 1; /* 100ms read timeout, so poll() can return */
+        g_in_mode_changed = tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == 0;
+    }
 #endif
 
     /* Mouse reporting: press and release only, no motion, which is all the UI
@@ -128,10 +134,10 @@ void term_shutdown(void) {
         g_alt_screen = 0;
     }
 #if defined(_WIN32)
-    if (g_in != INVALID_HANDLE_VALUE) SetConsoleMode(g_in, g_old_in);
-    SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), g_old_out);
+    if (g_in != INVALID_HANDLE_VALUE && g_in_mode_changed) SetConsoleMode(g_in, g_old_in);
+    if (g_out_mode_changed) SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), g_old_out);
 #else
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_old_term);
+    if (g_in_mode_changed) tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_old_term);
 #endif
     screen_free(g_front);
     screen_free(g_back);
