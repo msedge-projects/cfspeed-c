@@ -131,25 +131,35 @@ static void to_wide(const char *src, WCHAR *dst, size_t dst_chars) {
     dst[i] = 0;
 }
 
-static HINTERNET connect_for(const Url *u, DWORD *err) {
+/* The connect handle must stay open for as long as the request handle it
+ * produced. WinHttpOpenRequest returns a handle that refers back to its
+ * connection, and closing the connection out from under it leaves a request
+ * handle that still passes an IS_NULL_HANDLE check but fails every subsequent
+ * call - which looks exactly like a server refusing to answer. Handles are
+ * closed in reverse order of opening: request first, then connect. */
+static HINTERNET open_req(const Url *u, const char *verb, HINTERNET *conn_out) {
+    *conn_out = NULL;
     WCHAR wh[300];
     to_wide(u->host, wh, 300);
     HINTERNET c = WinHttpConnect(g_session, wh, u->port, 0);
-    if (!c) { *err = GetLastError(); return NULL; }
-    return c;
-}
-
-static HINTERNET open_req(const Url *u, const char *verb, DWORD flags) {
-    HINTERNET c = connect_for(u, &(DWORD){0});
     if (!c) return NULL;
+
     WCHAR wverb[16], wpath[600];
     to_wide(verb, wverb, 16);
     to_wide(u->path, wpath, 600);
     /* The accept-types argument is a pointer to a wide string, so NULL - "send
      * no Accept header" - is the correct value. This build sends none. */
-    HINTERNET r = WinHttpOpenRequest(c, wverb, wpath, NULL, WINHTTP_NO_REFERER,
-                                     NULL, flags);
-    WinHttpCloseHandle(c);
+    /* WINHTTP_FLAG_SECURE is what makes it HTTPS. The port alone does not:
+     * without this flag WinHTTP opens a plaintext connection to port 443 and
+     * the server answers "400 The plain HTTP request was sent to HTTPS port".
+     * That is the whole reason the first WinHTTP build measured nothing. */
+    DWORD flags = u->https ? WINHTTP_FLAG_SECURE : 0;
+    HINTERNET r = WinHttpOpenRequest(c, wverb, wpath, NULL, WINHTTP_NO_REFERER, NULL, flags);
+    if (!r) {
+        WinHttpCloseHandle(c);
+        return NULL;
+    }
+    *conn_out = c;
     return r;
 }
 
@@ -179,24 +189,23 @@ static int http_get_text(const char *url, char **out, size_t *out_len, DWORD *co
     Url u;
     if (url_split(url, &u) != 0) return NET_ERR;
 
-    HINTERNET req = open_req(&u, "GET", 0);
+    HINTERNET conn = NULL;
+    HINTERNET req = open_req(&u, "GET", &conn);
     if (!req) return NET_ERR;
     set_timeouts(req);
 
     if (!WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0,
-                            0, 0)) {
+                            0, 0) ||
+        !WinHttpReceiveResponse(req, NULL)) {
         WinHttpCloseHandle(req);
-        return NET_ERR;
-    }
-    if (!WinHttpReceiveResponse(req, NULL)) {
-        WinHttpCloseHandle(req);
+        WinHttpCloseHandle(conn);
         return NET_ERR;
     }
     *code = status_of(req);
 
     size_t cap = 8192, len = 0;
     char *buf = (char *)malloc(cap);
-    if (!buf) { WinHttpCloseHandle(req); return NET_ERR; }
+    if (!buf) { WinHttpCloseHandle(req); WinHttpCloseHandle(conn); return NET_ERR; }
 
     for (;;) {
         DWORD avail = 0;
@@ -206,7 +215,7 @@ static int http_get_text(const char *url, char **out, size_t *out_len, DWORD *co
             size_t ncap = cap;
             while (ncap < len + avail + 1) ncap *= 2;
             char *nb = (char *)realloc(buf, ncap);
-            if (!nb) { free(buf); WinHttpCloseHandle(req); return NET_ERR; }
+            if (!nb) { free(buf); WinHttpCloseHandle(req); WinHttpCloseHandle(conn); return NET_ERR; }
             buf = nb;
             cap = ncap;
         }
@@ -215,6 +224,7 @@ static int http_get_text(const char *url, char **out, size_t *out_len, DWORD *co
         len += got;
     }
     WinHttpCloseHandle(req);
+    WinHttpCloseHandle(conn);
 
     buf[len] = '\0';
     *out = buf;
@@ -290,12 +300,17 @@ int net_init(void) {
         WSACleanup();
         return NET_ERR;
     }
-    /* Match net.c's curl_base() agent string. The length is the header's own
-     * length: WinHTTP treats the buffer as raw bytes here, not a C string. */
-    WCHAR ua_hdr[64];
-    to_wide("User-Agent: cfspeed", ua_hdr, 64);
-    WinHttpSetOption(g_session, WINHTTP_OPTION_USER_AGENT, ua_hdr,
-                     (DWORD)wcslen(ua_hdr));
+    /* Match net.c's curl_base() agent string.
+     *
+     * This option takes the BARE agent string, not a header line. Passing
+     * "User-Agent: cfspeed" builds a header reading
+     * "User-Agent: User-Agent: cfspeed", and Cloudflare answers that with 403:
+     * the app ran, measured nothing, and reported an error rather than a wrong
+     * number. Measured, not assumed - every per-request variant returned 200
+     * while the session override returned 403. */
+    WCHAR ua[32];
+    to_wide("cfspeed", ua, 32);
+    WinHttpSetOption(g_session, WINHTTP_OPTION_USER_AGENT, ua, (DWORD)wcslen(ua));
     return NET_OK;
 }
 
@@ -492,8 +507,8 @@ static int do_download(const char *base, unsigned long chunk, Worker *w, uint64_
     Url u;
     if (url_split(url, &u) != 0) return 0;
 
-    DWORD code = 0;
-    HINTERNET req = open_req(&u, "GET", 0);
+    HINTERNET conn = NULL;
+    HINTERNET req = open_req(&u, "GET", &conn);
     if (!req) return 0;
     set_timeouts(req);
 
@@ -501,9 +516,10 @@ static int do_download(const char *base, unsigned long chunk, Worker *w, uint64_
                             0, 0) ||
         !WinHttpReceiveResponse(req, NULL)) {
         WinHttpCloseHandle(req);
+        WinHttpCloseHandle(conn);
         return 0;
     }
-    code = status_of(req);
+    int code = (int)status_of(req);
 
     char buf[65536];
     uint64_t local = 0;
@@ -522,8 +538,9 @@ static int do_download(const char *base, unsigned long chunk, Worker *w, uint64_
         if (w->counter) atomic_add_u64(w->counter, (uint64_t)got);
     }
     WinHttpCloseHandle(req);
+    WinHttpCloseHandle(conn);
     if (count) *count = local;
-    return (int)code;
+    return code;
 }
 
 /* POST the body. Returns the HTTP status, or 0 if the request never completed.
@@ -540,7 +557,8 @@ static int do_upload(const char *base, const unsigned char *body, size_t body_le
     WCHAR hdrs[16];
     to_wide("Expect:\r\n", hdrs, 16);
 
-    HINTERNET req = open_req(&u, "POST", 0);
+    HINTERNET conn = NULL;
+    HINTERNET req = open_req(&u, "POST", &conn);
     if (!req) return 0;
     set_timeouts(req);
 
@@ -573,6 +591,7 @@ static int do_upload(const char *base, const unsigned char *body, size_t body_le
         }
     }
     WinHttpCloseHandle(req);
+    WinHttpCloseHandle(conn);
     return code;
 }
 
