@@ -35,7 +35,6 @@ jobs:
           update: true
           install: >-
             mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-curl
             make
 
       - name: Build (Linux)
@@ -55,39 +54,25 @@ jobs:
           strip cfspeed.exe || true
           test -f cfspeed.exe
 
-      # Windows libcurl is GnuTLS-backed, and GnuTLS reads its trust list from
-      # a file. Windows keeps its trust store in a registry database that only
-      # schannel can read, so without this file every request fails certificate
-      # verification and the app measures nothing at all.
-      - name: Fetch CA bundle
-        if: matrix.os == 'windows-latest'
-        shell: msys2 {0}
-        run: bash scripts/fetch-ca.sh cfspeed-ca.pem
+      # No CA fetch and no DLL collection: the Windows build is WinHTTP, which
+      # ships with Windows and reads the Windows trust store. The package is
+      # the executable and nothing else.
 
-      - name: Collect Windows runtime dependencies
-        if: matrix.os == 'windows-latest'
-        shell: msys2 {0}
-        run: |
-          export PATH="/mingw64/bin:$PATH"
-          # The walk lives in a script, not inline here: it is the one piece of
-          # this workflow with real logic in it, and inline YAML through the
-          # MSYS2 wrapper failed in ways that were painful to diagnose. A
-          # versioned script can be run and tested on its own.
-          bash scripts/collect-dlls.sh
-
-      # Git Bash on the Windows runners has no `zip`, so that platform uses
-      # PowerShell's archiver instead. Both steps write the same flat layout:
-      # the exe, the runtime DLLs and the CA bundle in one directory.
       - name: Package (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Compress-Archive -Path stage/* -DestinationPath dist/cfspeed-${{ matrix.asset }}.zip
+          Copy-Item cfspeed.exe dist/
+          Compress-Archive -Path dist/cfspeed.exe -DestinationPath dist/cfspeed-${{ matrix.asset }}.zip
           if (-not (Test-Path dist/cfspeed-${{ matrix.asset }}.zip)) {
             Write-Error 'zip was not created'
             exit 1
           }
+          # One file, no more. A dependency reappearing here means the WinHTTP
+          # switch regressed and the package would install 14 MB again.
+          $n = (Get-ChildItem dist/cfspeed.exe).Length
+          Write-Host ("packaged a single {0:N0} byte executable" -f $n)
 
       - name: Package (Linux/macOS)
         if: matrix.os != 'windows-latest'

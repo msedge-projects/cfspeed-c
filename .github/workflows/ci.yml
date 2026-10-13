@@ -36,7 +36,6 @@ jobs:
           update: true
           install: >-
             mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-curl
             make
 
       - name: Build (Linux)
@@ -115,10 +114,8 @@ jobs:
       # Deliberately no continue-on-error anywhere on this path: a run that
       # measured nothing has to fail the job, not annotate it.
       #
-      # These steps sit after the upload on purpose. The Windows leg writes
-      # cfspeed-ca.pem into the workspace root, and the artifact glob is
-      # `cfspeed*` - running the gate first would silently change what gets
-      # uploaded.
+      # These steps sit after the upload so a smoke run cannot perturb what the
+      # artifact contains.
       #
       # KNOWN FLAKINESS, stated rather than papered over: Cloudflare rate-limits
       # repeated speed tests from one address, and cfspeed detects that case and
@@ -130,11 +127,10 @@ jobs:
       # starts reproducing, the fix belongs in how often we test, not in the
       # assertions.
 
-      # No cfspeed-ca.pem on Linux or macOS, and that is the code's own view,
-      # not an assumption: use_ca_bundle() in src/net.c only probes for the
-      # bundle inside `#if defined(_WIN32)`. The POSIX branch points at
-      # /etc/ssl/certs/ca-certificates.crt and otherwise falls through to
-      # curl's default, which finds the system store unaided on both runners.
+      # No platform needs a CA bundle now. The POSIX build uses libcurl, whose
+      # default finds /etc/ssl/certs/ca-certificates.crt unaided on both runners;
+      # the Windows build uses WinHTTP, which reads the Windows trust store
+      # directly. Neither ships a certificate file.
       - name: Smoke test (Linux)
         if: matrix.os == 'ubuntu-latest'
         # A full run is ~30-40s. This is headroom for a cold runner and a slow
@@ -148,13 +144,11 @@ jobs:
         timeout-minutes: 5
         run: bash scripts/smoke.sh ./cfspeed
 
-      # Windows is the leg that genuinely needs help, and it is the leg that
-      # silently shipped the curl-60 bug twice. src/net.c probes for
-      # cfspeed-ca.pem next to the executable; fetch-ca.sh writes it into the
-      # workspace root, which is where the freshly built cfspeed.exe sits.
-      # (fetch-ca.sh over fetch-ca.ps1 here purely because this step already
-      # runs inside the MSYS2 shell - same contract, same validation, no
-      # PowerShell-through-MSYS2 path translation.)
+      # Windows is the leg that silently shipped the curl-60 bug twice: a build
+      # that could not verify a single certificate still went green, because the
+      # gate only ever compiled it. This one runs it, which is why a missing CA
+      # store is caught here rather than by a user. WinHTTP removed the cause,
+      # but the gate is what keeps it from coming back.
       #
       # Honest caveat: this may well be belt-and-braces on the runner itself.
       # MSYS2 ships /mingw64/etc/ssl/certs/ca-bundle.crt, and GnuTLS falls back
@@ -180,5 +174,5 @@ jobs:
         timeout-minutes: 5
         run: |
           export PATH="/mingw64/bin:$PATH"
-          bash scripts/fetch-ca.sh cfspeed-ca.pem
+          # No CA fetch: WinHTTP uses the Windows trust store.
           bash scripts/smoke.sh ./cfspeed.exe
