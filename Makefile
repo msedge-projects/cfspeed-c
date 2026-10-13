@@ -34,7 +34,18 @@ BIN := cfspeed
 # The version string comes from the tag, so the binary cannot report a version
 # that is not what was released. Falls back to the most recent tag, then to
 # "dev" for an untagged tree.
-VERSION ?= $(patsubst v%,%,$(shell git describe --tags --abbrev=0 2>/dev/null || echo dev))
+# Prefer the nearest tag. On CI the checkout is shallow and `git describe`
+# cannot see history, so fall back to the ref name the workflow already knows -
+# that is the tag on a tag build and the branch otherwise. Only a bare local
+# tree gets "dev".
+CFSTAG := $(shell git describe --tags --abbrev=0 2>/dev/null)
+ifeq ($(CFSTAG),)
+  CFSTAG := $(GITHUB_REF_NAME)
+endif
+ifeq ($(CFSTAG),)
+  CFSTAG := dev
+endif
+VERSION ?= $(patsubst v%,%,$(CFSTAG))
 CFLAGS  += -DCFS_VERSION='"$(VERSION)"'
 
 HDRS := src/term.h src/net.h src/engine.h src/ui.h src/theme.h src/env_size.h \
