@@ -28,7 +28,12 @@
 #include <string.h>
 #include <time.h>
 
-#define CFS_VERSION "0.1.0"
+/* Supplied by the build from the git tag. A literal here silently went stale
+ * across three releases - the binary answered 0.1.0 while shipping as 0.3.0 -
+ * so the default exists only for an untagged local build. */
+#ifndef CFS_VERSION
+#define CFS_VERSION "dev"
+#endif
 
 #define EXIT_USAGE 2
 

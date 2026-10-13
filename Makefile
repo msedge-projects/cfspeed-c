@@ -31,6 +31,12 @@ SRC := src/main.c src/term.c src/engine.c src/ui.c \
 OBJ := $(SRC:.c=.o)
 BIN := cfspeed
 
+# The version string comes from the tag, so the binary cannot report a version
+# that is not what was released. Falls back to the most recent tag, then to
+# "dev" for an untagged tree.
+VERSION ?= $(patsubst v%,%,$(shell git describe --tags --abbrev=0 2>/dev/null || echo dev))
+CFLAGS  += -DCFS_VERSION='"$(VERSION)"'
+
 HDRS := src/term.h src/net.h src/engine.h src/ui.h src/theme.h src/env_size.h \
        src/history.h src/views.h src/cli.h src/stats.h src/chart.h \
        src/fmt.h src/keymap.h src/actions.h src/menu.h src/netwin.c
